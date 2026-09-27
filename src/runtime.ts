@@ -1,5 +1,5 @@
 import { createLiveFirecrawl, type FirecrawlScraper } from './02_enrichment/index';
-import { mockScoreRubric } from './03_qualification/index';
+import { createOllamaClient, mockScoreRubric, type OllamaFetchLike } from './03_qualification/index';
 import {
   createLiveResend,
   createLiveSlack,
@@ -34,6 +34,7 @@ export interface Runtime {
 export interface RuntimeDeps {
   firecrawlClient?: FirecrawlScraper;
   fetch?: FetchLike;
+  ollamaFetch?: OllamaFetchLike;
 }
 
 export function buildRuntime(config: Config, deps: RuntimeDeps = {}): Runtime {
@@ -55,7 +56,7 @@ export function buildRuntime(config: Config, deps: RuntimeDeps = {}): Runtime {
   };
 
   if (config.MOCK_MODE) {
-    const liveKeys = (['ANTHROPIC_API_KEY', 'FIRECRAWL_API_KEY', 'SLACK_WEBHOOK_URL', 'RESEND_API_KEY', 'ATTIO_API_KEY', 'HUBSPOT_API_KEY'] as const).filter(k => config[k]);
+    const liveKeys = (['ANTHROPIC_API_KEY', 'OLLAMA_MODEL', 'FIRECRAWL_API_KEY', 'SLACK_WEBHOOK_URL', 'RESEND_API_KEY', 'ATTIO_API_KEY', 'HUBSPOT_API_KEY'] as const).filter(k => config[k]);
     if (liveKeys.length) warnings.push(`MOCK_MODE=true: ignoring configured credentials (${liveKeys.join(', ')}). Set MOCK_MODE=false to use them.`);
     return { mode: 'mock', pipeline, sender, crm, integrations, warnings };
   }
@@ -67,11 +68,17 @@ export function buildRuntime(config: Config, deps: RuntimeDeps = {}): Runtime {
     warnings.push('FIRECRAWL_API_KEY is not set: enrichment stays on the mock providers.');
   }
 
-  if (config.ANTHROPIC_API_KEY) {
+  // A local model is free, so when one is configured it wins over the paid Claude API.
+  if (config.OLLAMA_MODEL) {
+    const client = createOllamaClient({ baseUrl: config.OLLAMA_BASE_URL, fetch: deps.ollamaFetch });
+    pipeline.qualify = { client, model: config.OLLAMA_MODEL };
+    integrations.qualification = `local model (ollama: ${config.OLLAMA_MODEL})`;
+    if (config.ANTHROPIC_API_KEY) warnings.push('OLLAMA_MODEL is set, so qualification uses the local model and ANTHROPIC_API_KEY is not used.');
+  } else if (config.ANTHROPIC_API_KEY) {
     pipeline.qualify = {};
     integrations.qualification = 'claude (live)';
   } else {
-    warnings.push('ANTHROPIC_API_KEY is not set: qualification uses the offline scorer.');
+    warnings.push('Neither OLLAMA_MODEL nor ANTHROPIC_API_KEY is set: qualification uses the offline scorer.');
   }
 
   if (config.SLACK_WEBHOOK_URL) {

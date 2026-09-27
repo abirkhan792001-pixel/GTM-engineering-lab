@@ -74,3 +74,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ''
         run: npm run qualify:live
+
+      # With no Ollama server on the runner, the local-model runner must skip cleanly.
+      - name: Local-model runner skips without Ollama
+        run: npm run qualify:local

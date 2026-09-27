@@ -5,6 +5,7 @@ import { generateMockSignals } from '../src/01_signals/index';
 import { enrichLead } from '../src/02_enrichment/index';
 import {
   checkHardGates,
+  createOllamaClient,
   decide,
   DEFAULT_QUALIFIER_MODEL,
   evaluateICP,
@@ -14,7 +15,7 @@ import {
 } from '../src/03_qualification/index';
 import { ICP, IcpSchema } from '../src/shared/icp';
 import type { Lead, Qualification } from '../src/shared/types';
-import { CLOCKS, enriched, makeLead, NOW, OFFLINE, signal, TARGET_FIRMOGRAPHICS } from './helpers';
+import { CLOCKS, enriched, fakeOllama, makeLead, NOW, OFFLINE, signal, TARGET_FIRMOGRAPHICS } from './helpers';
 
 async function qualifyMock(index: number): Promise<Qualification> {
   const lead = generateMockSignals()[index]!.lead;
@@ -296,4 +297,64 @@ describe('03 qualification: Claude evaluator safe fallbacks', () => {
     assert.match(q.evidence[0]!, /could not reach the API/);
     assert.ok(Date.now() - started < 30_000);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Local model via Ollama: a drop-in `client`, so the same prompt, schema and policy apply.
+// Every test injects a fake /api/chat endpoint: no Ollama server is needed.
+// ---------------------------------------------------------------------------
+
+describe('03 qualification: local model evaluator (Ollama)', () => {
+  const local = (respond: Parameters<typeof fakeOllama>[0]) => {
+    const ollama = fakeOllama(respond);
+    return { client: createOllamaClient({ baseUrl: 'http://ollama.test:11434/', fetch: ollama.fetch }), calls: ollama.calls };
+  };
+  const qualifyLocal = async (lead: Lead, client: ClaudeClient) => (await qualifyLead(lead, { now: CLOCKS.qualify, client, model: 'llama3.2' })).qualification!;
+
+  it('sends the rubric, the lead and the output schema to /api/chat', async () => {
+    const { client, calls } = local({ content: NORTHWIND_OUTPUT });
+    await qualifyLocal(await enrichedMock(0), client);
+    assert.equal(calls.length, 1);
+    const { url, body } = calls[0]!;
+    assert.equal(url, 'http://ollama.test:11434/api/chat', 'trailing slash on the base URL is dropped');
+    assert.equal(body.model, 'llama3.2');
+    assert.equal(body.stream, false);
+    assert.deepEqual(body.messages.map((m: { role: string }) => m.role), ['system', 'user']);
+    assert.match(body.messages[0].content, /ideal customer profile/);
+    assert.match(body.messages[1].content, /northwind-data\.example/);
+    assert.deepEqual(body.format.required, ['score', 'decision', 'evidence', 'missingFields']);
+    assert.deepEqual(body.format.properties.decision.enum, ['pass', 'hold', 'disqualify']);
+  });
+
+  it('passes a lead through the same policy as Claude, labelled with the local model', async () => {
+    const { client } = local({ content: NORTHWIND_OUTPUT });
+    const q = await qualifyLocal(await enrichedMock(0), client);
+    assert.equal(q.decision, 'pass');
+    assert.equal(q.score, 97);
+    assert.equal(q.evidence[0], `Scored by llama3.2 against rubric ${ICP.version}`);
+  });
+
+  it('cannot pass a lead the thresholds would hold, whatever the model says', async () => {
+    const { client } = local({ content: { score: 60, decision: 'pass', evidence: ['Partial fit'], missingFields: [] } });
+    const q = await qualifyLocal(makeLead(), client);
+    assert.equal(q.decision, 'hold');
+    assert.ok(q.evidence.includes("Model recommended 'pass'; policy applied 'hold'"));
+  });
+
+  const failures: [string, Parameters<typeof fakeOllama>[0], RegExp][] = [
+    ['Ollama not running', () => { throw new Error('connect ECONNREFUSED 127.0.0.1:11434'); }, /could not reach Ollama at http:\/\/ollama\.test:11434 \(is it running\?\)/],
+    ['a model that is not pulled', { status: 404, content: '{"error":"model \'llama3.2\' not found"}' }, /Ollama returned 404: .*not found/],
+    ['a reply that is not JSON', { content: 'Sure! Here is my assessment...' }, /no structured output/],
+    ['JSON that breaks the schema', { content: { score: 90, decision: 'pass', evidence: [], missingFields: [] } }, /violates QualificationSchema/],
+  ];
+  for (const [name, respond, reason] of failures) {
+    it(`falls back to a safe hold on ${name}`, async () => {
+      const { client } = local(respond);
+      const q = await qualifyLocal(await enrichedMock(1), client);
+      assert.equal(q.decision, 'hold');
+      assert.equal(q.score, 0);
+      assert.match(q.evidence[0]!, /^LLM evaluation unavailable \(/);
+      assert.match(q.evidence[0]!, reason);
+    });
+  }
 });

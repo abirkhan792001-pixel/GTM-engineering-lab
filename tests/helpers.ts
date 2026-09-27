@@ -13,10 +13,10 @@ import type { Contact, EnrichmentResult, Lead, Qualification, Signal } from '../
 process.env.ANTHROPIC_API_KEY = 'test-key-no-network';
 process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:9';
 delete process.env.QUALIFIER_MODEL;
-// Likewise no test may reach Firecrawl, Slack or Resend: live adapters are only ever built
+// Likewise no test may reach Ollama, Firecrawl, Slack or Resend: live adapters are only ever built
 // with injected fakes, and real credentials from the shell are cleared.
 process.env.MOCK_MODE = 'true';
-for (const key of ['FIRECRAWL_API_KEY', 'SLACK_WEBHOOK_URL', 'RESEND_API_KEY', 'RESEND_FROM', 'DRAFT_REVIEW_EMAIL', 'ATTIO_API_KEY', 'HUBSPOT_API_KEY', 'WEBHOOK_SECRET']) {
+for (const key of ['OLLAMA_MODEL', 'OLLAMA_BASE_URL', 'FIRECRAWL_API_KEY', 'SLACK_WEBHOOK_URL', 'RESEND_API_KEY', 'RESEND_FROM', 'DRAFT_REVIEW_EMAIL', 'ATTIO_API_KEY', 'HUBSPOT_API_KEY', 'WEBHOOK_SECRET']) {
   delete process.env[key];
 }
 
@@ -111,6 +111,20 @@ export function fakeFetch(respond: { status?: number; body?: string } | (() => n
     if (typeof respond === 'function') return respond();
     const status = respond.status ?? 200;
     return { ok: status >= 200 && status < 300, status, text: async () => respond.body ?? '' };
+  };
+  return { fetch, calls };
+}
+
+// A fake Ollama /api/chat endpoint: records requests and replies with a fixed message
+// content (an object is sent as JSON, a string as-is), a status, or throws.
+export function fakeOllama(respond: { content?: unknown; status?: number } | (() => never) = {}) {
+  const calls: { url: string; body: any }[] = [];
+  const fetch = async (url: string, init: RequestInit) => {
+    calls.push({ url, body: JSON.parse(String(init.body)) });
+    if (typeof respond === 'function') return respond();
+    const status = respond.status ?? 200;
+    const content = typeof respond.content === 'string' ? respond.content : JSON.stringify(respond.content ?? {});
+    return { ok: status >= 200 && status < 300, status, text: async () => content, json: async () => ({ message: { content } }) };
   };
   return { fetch, calls };
 }

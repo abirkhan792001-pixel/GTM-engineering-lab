@@ -57,6 +57,7 @@ npm run pipeline:run  # full pipeline on 3 mock leads
 | `npm run activate:dev` | What happens for each decision |
 | `npm run learn:dev` | A/B results across 10 leads |
 | `npm run qualify:live` | Real Claude scoring (needs an API key) |
+| `npm run qualify:local` | Free scoring with a local model (needs Ollama) |
 | `npm run server:dev` | Webhook server on port 3000 (see below) |
 | `npm run report:pdf` | Full pipeline plus a PDF executive brief in `reports/` |
 
@@ -74,6 +75,22 @@ cp .env.example .env    # add your ANTHROPIC_API_KEY
 npm run qualify:live    # 2 API calls
 ```
 
+### Free alternative: a local model
+
+Claude is billed per request. To score for free, run an open model on your own machine with
+[Ollama](https://ollama.com). It gets the same prompt, the same output schema and the same
+code-side checks as Claude, so a bad answer still ends in a hold, never a wrong pass. Small
+local models follow the rubric less reliably, so expect more holds.
+
+```sh
+ollama pull llama3.2    # one-time download, about 2 GB
+npm run qualify:local   # scores the mock leads and compares with the offline scorer
+```
+
+To use it in the pipeline and webhook server, set `MOCK_MODE=false` and `OLLAMA_MODEL=llama3.2`
+(and `OLLAMA_BASE_URL` if Ollama runs on another machine). When `OLLAMA_MODEL` is set it is
+used instead of Claude.
+
 ## Live mode and the webhook server
 
 Copy `.env.example` to `.env`, set `MOCK_MODE=false`, and add the keys you have. Each
@@ -82,6 +99,7 @@ server prints a warning for each fallback.
 
 | Integration | Needs | Live behaviour |
 |---|---|---|
+| Local model scoring (free) | `OLLAMA_MODEL` | Scores leads that pass the dealbreaker rules; used instead of Claude when set |
 | Claude scoring | `ANTHROPIC_API_KEY` | Scores leads that pass the dealbreaker rules |
 | Firecrawl | `FIRECRAWL_API_KEY` | Scrapes the homepage when Apollo can't fill required fields |
 | Slack | `SLACK_WEBHOOK_URL` | Posts Block Kit alerts to the webhook's channel |

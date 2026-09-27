@@ -1,5 +1,6 @@
 // Qualification: cheap deterministic dealbreaker gates first; only leads that pass
-// them reach the ICP evaluator (Claude by default, or an offline scorer).
+// them reach the ICP evaluator (Claude by default, a free local model via Ollama, or an
+// offline scorer).
 
 import { LeadSchema, type Lead } from '../shared/types';
 import { evaluateICP, type EvaluateOptions } from './evaluator';
@@ -16,7 +17,13 @@ export {
   type RubricResult,
   type RubricScorer,
 } from './evaluator';
-
+export {
+  createOllamaClient,
+  DEFAULT_OLLAMA_BASE_URL,
+  DEFAULT_OLLAMA_MODEL,
+  type OllamaClientOptions,
+  type OllamaFetchLike,
+} from './localModelClient';
 
 export interface QualifyOptions extends Omit<EvaluateOptions, 'asOfMs'> {
   // Injected clock: used both as the signal-freshness reference and for updatedAt.

@@ -4,7 +4,7 @@ import { generateMockSignals } from '../src/01_signals/index';
 import { processLead } from '../src/runPipeline';
 import { buildRuntime } from '../src/runtime';
 import { loadConfig } from '../src/shared/config';
-import { CLOCKS, fakeFetch, fakeFirecrawl } from './helpers';
+import { CLOCKS, fakeFetch, fakeFirecrawl, fakeOllama } from './helpers';
 
 // Config parsing, and how MOCK_MODE plus the available credentials pick each integration.
 // Every live adapter here uses an injected fake: no test reaches a real API.
@@ -34,6 +34,7 @@ describe('config', () => {
   for (const [name, env] of [
     ['a misspelt MOCK_MODE', { MOCK_MODE: 'flase' }],
     ['a malformed Slack URL', { SLACK_WEBHOOK_URL: 'not a url' }],
+    ['a malformed Ollama URL', { OLLAMA_BASE_URL: 'localhost 11434' }],
     ['a malformed review email', { DRAFT_REVIEW_EMAIL: 'nope' }],
     ['an out-of-range port', { PORT: '70000' }],
     ['a short approval token', { APPROVAL_TOKEN: 'short' }],
@@ -98,6 +99,21 @@ describe('runtime: choosing mock or live integrations', () => {
     assert.equal(runtime.pipeline.adapters!.crm, runtime.crm);
   });
 
+  it('scores with a local model when OLLAMA_MODEL is set, and prefers it over Claude', () => {
+    const local = buildRuntime(loadConfig({ MOCK_MODE: 'false', OLLAMA_MODEL: 'llama3.2' }));
+    assert.equal(local.integrations.qualification, 'local model (ollama: llama3.2)');
+    assert.equal(local.pipeline.qualify!.model, 'llama3.2');
+    assert.ok(!local.warnings.some(w => w.includes('offline scorer')));
+
+    const both = buildRuntime(loadConfig({ MOCK_MODE: 'false', OLLAMA_MODEL: 'llama3.2', ANTHROPIC_API_KEY: 'sk-test' }));
+    assert.equal(both.integrations.qualification, 'local model (ollama: llama3.2)');
+    assert.ok(both.warnings.some(w => w.includes('ANTHROPIC_API_KEY is not used')));
+
+    const mock = buildRuntime(loadConfig({ MOCK_MODE: 'true', OLLAMA_MODEL: 'llama3.2' }));
+    assert.equal(mock.integrations.qualification, 'offline scorer');
+    assert.match(mock.warnings[0]!, /ignoring configured credentials \(OLLAMA_MODEL\)/);
+  });
+
   it('flags CRM keys as not yet used, rather than silently ignoring them', () => {
     const runtime = buildRuntime(loadConfig({ MOCK_MODE: 'false', HUBSPOT_API_KEY: 'hs-test' }));
     assert.ok(runtime.warnings.some(w => w.includes('CRM adapter is still a mock')));
@@ -129,6 +145,16 @@ describe('runtime: end-to-end pipeline runs', () => {
     assert.ok(targets.includes('https://hooks.slack.example/services/T/B/X'), 'Slack webhook called');
     assert.ok(targets.includes('https://api.resend.com/emails'), 'draft sent to the review inbox');
     assert.equal(n.activation.alerts[0]!.delivery, 'sent');
+  });
+
+  it('qualifies with the local model end to end (a fake stands in for Ollama)', async () => {
+    const ollama = fakeOllama({ content: { score: 96, decision: 'pass', evidence: ['Target industry and size, fresh hiring signal'], missingFields: [] } });
+    const runtime = buildRuntime(loadConfig({ MOCK_MODE: 'false', OLLAMA_MODEL: 'llama3.2', OLLAMA_BASE_URL: 'http://gpu-box:11434' }), { ollamaFetch: ollama.fetch });
+    const [northwind] = mockLeads();
+    const result = await processLead(northwind!, { ...runtime.pipeline, clocks: CLOCKS });
+    assert.equal(ollama.calls[0]!.url, 'http://gpu-box:11434/api/chat');
+    assert.equal(result.lead.qualification!.evidence[0], 'Scored by llama3.2 against rubric icp-v2');
+    assert.equal(result.activation.outcome, 'activated');
   });
 
   it('keeps going when every live API fails', async () => {

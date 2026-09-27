@@ -13,6 +13,7 @@
     "enrich:dev": "tsx src/02_enrichment/run.ts",
     "qualify:dev": "tsx src/03_qualification/run.ts",
     "qualify:live": "tsx src/03_qualification/runLive.ts",
+    "qualify:local": "tsx src/03_qualification/runLocal.ts",
     "contacts:dev": "tsx src/04_contacts/run.ts",
     "activate:dev": "tsx src/05_activation/run.ts",
     "pipeline:run": "tsx src/runPipeline.ts",

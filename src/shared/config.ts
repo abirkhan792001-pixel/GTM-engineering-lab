@@ -24,6 +24,10 @@ const Optional = z
 export const ConfigSchema = z.object({
   MOCK_MODE: Bool.default(true),
   ANTHROPIC_API_KEY: Optional,
+  // Free local alternative to Claude for qualification: a model name pulled into Ollama,
+  // e.g. "llama3.2". Takes precedence over ANTHROPIC_API_KEY when both are set.
+  OLLAMA_MODEL: Optional,
+  OLLAMA_BASE_URL: Optional.pipe(z.url().optional()),
   FIRECRAWL_API_KEY: Optional,
   SLACK_WEBHOOK_URL: Optional.pipe(z.url().optional()),
   RESEND_API_KEY: Optional,
