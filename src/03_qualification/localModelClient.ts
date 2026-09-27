@@ -17,13 +17,27 @@ import { ClaudeQualificationSchema, type ClaudeClient } from './evaluator';
 
 export const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434';
 export const DEFAULT_OLLAMA_MODEL = 'llama3.2';
+// A qualification answer needs a few hundred tokens. The cap stops a small model that
+// loops (repeating text inside the JSON) instead of letting it run for minutes.
+export const DEFAULT_OLLAMA_MAX_OUTPUT_TOKENS = 1024;
+// Whole-request backstop, including loading the model into memory on a slow machine.
+export const DEFAULT_OLLAMA_TIMEOUT_MS = 600_000;
 
 // The Response subset used, so tests can inject a fake with no network access.
-export type OllamaFetchLike = (input: string, init: RequestInit) => Promise<Pick<Response, 'ok' | 'status' | 'text' | 'json'>>;
+export type OllamaFetchLike = (input: string, init: RequestInit) => Promise<Pick<Response, 'ok' | 'status' | 'text'>>;
 
 export interface OllamaClientOptions {
   baseUrl?: string;
   fetch?: OllamaFetchLike;
+  maxOutputTokens?: number;
+  timeoutMs?: number;
+}
+
+interface OllamaChunk {
+  message?: { content?: string };
+  done?: boolean;
+  done_reason?: string;
+  error?: string;
 }
 
 // Ollama constrains generation to this JSON schema, the same shape Claude is asked for.
@@ -38,6 +52,14 @@ interface ParseParams {
 export function createOllamaClient(options: OllamaClientOptions = {}): ClaudeClient {
   const baseUrl = (options.baseUrl ?? DEFAULT_OLLAMA_BASE_URL).replace(/\/+$/, '');
   const doFetch: OllamaFetchLike = options.fetch ?? ((input, init) => fetch(input, init));
+  const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_OLLAMA_MAX_OUTPUT_TOKENS;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_OLLAMA_TIMEOUT_MS;
+  const failure = (what: string, error: unknown) =>
+    new Error(
+      error instanceof Error && error.name === 'TimeoutError'
+        ? `Ollama did not finish within ${Math.round(timeoutMs / 1000)}s`
+        : `${what}: ${error instanceof Error ? error.message : String(error)}`,
+    );
 
   const parse = async (params: ParseParams) => {
     const messages = [
@@ -47,20 +69,56 @@ export function createOllamaClient(options: OllamaClientOptions = {}): ClaudeCli
 
     let res: Awaited<ReturnType<OllamaFetchLike>>;
     try {
+      // Streamed: Ollama sends response headers at once and tokens as it generates them.
+      // Unstreamed, it replies only when finished, and Node's fetch gives up after 300s
+      // without response headers, which a slow laptop can exceed.
       res = await doFetch(`${baseUrl}/api/chat`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: params.model, messages, format: OUTPUT_SCHEMA, stream: false, options: { temperature: 0 } }),
+        signal: AbortSignal.timeout(timeoutMs),
+        body: JSON.stringify({
+          model: params.model,
+          messages,
+          format: OUTPUT_SCHEMA,
+          stream: true,
+          options: { temperature: 0, num_predict: maxOutputTokens },
+        }),
       });
     } catch (error) {
-      throw new Error(`could not reach Ollama at ${baseUrl} (is it running?): ${error instanceof Error ? error.message : String(error)}`);
+      throw failure(`could not reach Ollama at ${baseUrl} (is it running?)`, error);
     }
     if (!res.ok) throw new Error(`Ollama returned ${res.status}: ${(await res.text()).slice(0, 200)}`);
 
-    const body = (await res.json()) as { message?: { content?: string } };
+    let raw: string;
+    try {
+      raw = await res.text();
+    } catch (error) {
+      throw failure('Ollama stopped mid-answer', error);
+    }
+
+    // Newline-delimited JSON: one chunk of the answer per line, then a final line saying
+    // why generation stopped.
+    let text = '';
+    let doneReason: string | undefined;
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      let chunk: OllamaChunk;
+      try {
+        chunk = JSON.parse(line) as OllamaChunk;
+      } catch {
+        throw new Error(`unreadable reply from Ollama: ${line.slice(0, 80)}`);
+      }
+      if (chunk.error) throw new Error(`Ollama error: ${chunk.error}`);
+      text += chunk.message?.content ?? '';
+      if (chunk.done) doneReason = chunk.done_reason;
+    }
+
+    // 'length' means the token cap cut the answer off; the evaluator reports it as truncated.
+    if (doneReason === 'length') return { stop_reason: 'max_tokens', parsed_output: null, content: [] };
+
     let parsed_output: unknown = null;
     try {
-      parsed_output = JSON.parse(body.message?.content ?? '');
+      parsed_output = JSON.parse(text);
     } catch {
       // Left null: the evaluator treats it as "no structured output" and holds the lead.
     }

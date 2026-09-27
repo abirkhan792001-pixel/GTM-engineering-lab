@@ -80,7 +80,9 @@ npm run qualify:live    # 2 API calls
 Claude is billed per request. To score for free, run an open model on your own machine with
 [Ollama](https://ollama.com). It gets the same prompt, the same output schema and the same
 code-side checks as Claude, so a bad answer still ends in a hold, never a wrong pass. Small
-local models follow the rubric less reliably, so expect more holds.
+local models follow the rubric less reliably, so expect more holds. On a laptop without a
+GPU, expect about a minute per lead; an answer that runs past 1,024 tokens (a model stuck
+repeating itself) is cut off and held.
 
 ```sh
 ollama pull llama3.2    # one-time download, about 2 GB

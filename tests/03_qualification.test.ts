@@ -337,7 +337,8 @@ describe('03 qualification: local model evaluator (Ollama)', () => {
     const { url, body } = calls[0]!;
     assert.equal(url, 'http://ollama.test:11434/api/chat', 'trailing slash on the base URL is dropped');
     assert.equal(body.model, 'llama3.2');
-    assert.equal(body.stream, false);
+    assert.equal(body.stream, true, 'streamed, so a slow model never hits the 300s response-header limit');
+    assert.equal(body.options.num_predict, 1024, 'a looping model is cut off');
     assert.deepEqual(body.messages.map((m: { role: string }) => m.role), ['system', 'user']);
     assert.match(body.messages[0].content, /ideal customer profile/);
     assert.match(body.messages[1].content, /northwind-data\.example/);
@@ -365,7 +366,18 @@ describe('03 qualification: local model evaluator (Ollama)', () => {
     ['a model that is not pulled', { status: 404, content: '{"error":"model \'llama3.2\' not found"}' }, /Ollama returned 404: .*not found/],
     ['a reply that is not JSON', { content: 'Sure! Here is my assessment...' }, /no structured output/],
     ['JSON that breaks the schema', { content: { score: 90, decision: 'pass', evidence: [], missingFields: [] } }, /violates QualificationSchema/],
+    ['an answer cut off by the token cap', { content: '{"score": 67, "evidence": ["x x x x', doneReason: 'length' }, /truncated/],
+    ['a timeout', () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); }, /Ollama did not finish within 600s/],
   ];
+  it('reports an error Ollama sends partway through the answer', async () => {
+    const client = createOllamaClient({
+      fetch: async () => ({ ok: true, status: 200, text: async () => '{"message":{"content":"{"},"done":false}\n{"error":"model runner has unexpectedly stopped"}' }),
+    });
+    const q = await qualifyLocal(await enrichedMock(1), client);
+    assert.equal(q.decision, 'hold');
+    assert.match(q.evidence[0]!, /Ollama error: model runner has unexpectedly stopped/);
+  });
+
   for (const [name, respond, reason] of failures) {
     it(`falls back to a safe hold on ${name}`, async () => {
       const { client } = local(respond);

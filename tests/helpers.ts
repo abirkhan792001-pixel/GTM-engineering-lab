@@ -115,16 +115,23 @@ export function fakeFetch(respond: { status?: number; body?: string } | (() => n
   return { fetch, calls };
 }
 
-// A fake Ollama /api/chat endpoint: records requests and replies with a fixed message
-// content (an object is sent as JSON, a string as-is), a status, or throws.
-export function fakeOllama(respond: { content?: unknown; status?: number } | (() => never) = {}) {
+// A fake Ollama /api/chat endpoint: records requests and streams a fixed message content
+// (an object is sent as JSON, a string as-is) the way Ollama does, as newline-delimited
+// JSON chunks and a final line with done_reason. Or replies with an error status, or throws.
+export function fakeOllama(respond: { content?: unknown; status?: number; doneReason?: string } | (() => never) = {}) {
   const calls: { url: string; body: any }[] = [];
   const fetch = async (url: string, init: RequestInit) => {
     calls.push({ url, body: JSON.parse(String(init.body)) });
     if (typeof respond === 'function') return respond();
     const status = respond.status ?? 200;
+    const ok = status >= 200 && status < 300;
     const content = typeof respond.content === 'string' ? respond.content : JSON.stringify(respond.content ?? {});
-    return { ok: status >= 200 && status < 300, status, text: async () => content, json: async () => ({ message: { content } }) };
+    const half = Math.ceil(content.length / 2);
+    const stream = [content.slice(0, half), content.slice(half)]
+      .map(part => JSON.stringify({ message: { role: 'assistant', content: part }, done: false }))
+      .concat(JSON.stringify({ message: { role: 'assistant', content: '' }, done: true, done_reason: respond.doneReason ?? 'stop' }))
+      .join('\n');
+    return { ok, status, text: async () => (ok ? stream : content) };
   };
   return { fetch, calls };
 }

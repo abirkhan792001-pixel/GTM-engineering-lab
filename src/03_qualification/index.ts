@@ -20,7 +20,9 @@ export {
 export {
   createOllamaClient,
   DEFAULT_OLLAMA_BASE_URL,
+  DEFAULT_OLLAMA_MAX_OUTPUT_TOKENS,
   DEFAULT_OLLAMA_MODEL,
+  DEFAULT_OLLAMA_TIMEOUT_MS,
   type OllamaClientOptions,
   type OllamaFetchLike,
 } from './localModelClient';
