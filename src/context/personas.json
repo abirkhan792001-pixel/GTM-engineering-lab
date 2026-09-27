@@ -1,0 +1,55 @@
+{
+  "version": "personas-v2",
+  "description": "Template buyer personas. Company fit and persona fit are scored independently. The first persona whose headcountRange matches the account is used for drafting.",
+  "personas": [
+    {
+      "id": "revops-leader",
+      "targetTitles": [
+        "Head of Revenue Operations",
+        "VP Revenue Operations",
+        "Director of Sales Operations",
+        "RevOps Manager"
+      ],
+      "seniority": [
+        "manager",
+        "director",
+        "vp"
+      ],
+      "headcountRange": {
+        "min": 50
+      },
+      "painPoints": [
+        "Lead routing and scoring rules are brittle and hard to audit",
+        "Enrichment spend grows faster than pipeline",
+        "CRM data is stale, duplicated or missing key firmographics",
+        "No clear attribution from outbound touch to meeting booked"
+      ]
+    },
+    {
+      "id": "growth-founder",
+      "targetTitles": [
+        "Founder",
+        "Co-Founder",
+        "CEO"
+      ],
+      "seniority": [
+        "founder",
+        "c-level"
+      ],
+      "headcountRange": {
+        "max": 49
+      },
+      "painPoints": [
+        "Founder is still running outbound manually",
+        "No repeatable system to find accounts showing buying intent",
+        "Unsure which messaging or segment actually converts"
+      ]
+    }
+  ],
+  "excludedTitles": [
+    "Intern",
+    "Student",
+    "Recruiter",
+    "Talent Acquisition"
+  ]
+}

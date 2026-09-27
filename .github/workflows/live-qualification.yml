@@ -1,0 +1,45 @@
+name: Live qualification (Anthropic API)
+
+# Manual only: each run calls the real Anthropic API and spends credits
+# (one request per mock lead that passes the hard gates, currently 2).
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'Model to use (blank for the default, claude-sonnet-5)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    name: Claude ICP evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require the ANTHROPIC_API_KEY secret
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::Add an ANTHROPIC_API_KEY repository secret (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Exits 1 if any evaluation fell back to a safe hold (bad key, model or schema).
+      - name: Run live qualification
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          QUALIFIER_MODEL: ${{ inputs.model }}
+        run: npm run qualify:live

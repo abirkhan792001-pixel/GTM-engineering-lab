@@ -1,0 +1,48 @@
+{
+  "version": "icp-v2",
+  "description": "Template ICP. Replace with your real targeting before running live batches.",
+  "companySize": {
+    "minEmployees": 20,
+    "maxEmployees": 500
+  },
+  "targetIndustries": [
+    "B2B SaaS",
+    "Developer Tools",
+    "Fintech Infrastructure",
+    "Data & Analytics"
+  ],
+  "targetCountries": ["US", "GB", "DE", "CH", "AT", "NL"],
+  "dealbreakers": [
+    "Consumer-only (B2C) business model",
+    "Agency or consultancy reselling services",
+    "Fewer than 10 employees",
+    "HQ outside the target countries",
+    "Existing customer or open opportunity in CRM",
+    "Sanctioned country or on the suppression list"
+  ],
+  "hardGates": {
+    "minHeadcount": 10,
+    "excludedBusinessModels": ["B2C"],
+    "excludedIndustryKeywords": ["consumer", "agency", "consultancy"],
+    "requireTargetCountry": true
+  },
+  "scoring": {
+    "weights": {
+      "industry": 30,
+      "companySize": 25,
+      "country": 15
+    },
+    "signalPoints": {
+      "hiring": 30,
+      "pricing-page-visit": 20,
+      "default": 10
+    },
+    "maxSignalAgeDays": 30
+  },
+  "qualification": {
+    "passThreshold": 70,
+    "holdThreshold": 40,
+    "requiredFields": ["industry", "headcount", "hqCountry"],
+    "notes": "Hard gates disqualify only on verified evidence of a dealbreaker; unknown values never disqualify, they hold. Missing evidence earns zero points and is listed in missingFields. Signal points decay linearly to zero at maxSignalAgeDays; only the strongest fresh signal counts. A pass needs score >= passThreshold and no missing required fields. Below holdThreshold is a poor fit and is disqualified with score 0. CRM and suppression dealbreakers are enforced at activation, not here."
+  }
+}
