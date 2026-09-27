@@ -13,9 +13,10 @@
     "enrich:dev": "tsx src/02_enrichment/run.ts",
     "qualify:dev": "tsx src/03_qualification/run.ts",
     "qualify:live": "tsx src/03_qualification/runLive.ts",
-    "activate:dev": "tsx src/04_activation/run.ts",
+    "contacts:dev": "tsx src/04_contacts/run.ts",
+    "activate:dev": "tsx src/05_activation/run.ts",
     "pipeline:run": "tsx src/runPipeline.ts",
-    "learn:dev": "tsx src/05_learning/run.ts"
+    "learn:dev": "tsx src/06_learning/run.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",

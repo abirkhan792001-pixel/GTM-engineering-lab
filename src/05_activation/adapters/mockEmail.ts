@@ -1,5 +1,6 @@
 import { mergedEnrichmentData } from '../../02_enrichment/index';
-import { assignVariant, FIRST_TOUCH_EXPERIMENT, renderTemplate, type Experiment } from '../../05_learning/index';
+import { recipientGap, sendableEmail } from '../../04_contacts/index';
+import { assignVariant, FIRST_TOUCH_EXPERIMENT, renderTemplate, type Experiment } from '../../06_learning/index';
 import { PERSONAS, selectPersona, type Persona } from '../../shared/personas';
 import { EmailDraftSchema, type EmailDraft, type Lead, type Signal } from '../../shared/types';
 import { VOICE, type VoiceGuidelines } from '../../shared/voice';
@@ -13,10 +14,11 @@ import { VOICE, type VoiceGuidelines } from '../../shared/voice';
 // limits and banned words. Failed checks become review notes; they are never hidden.
 //
 // A/B test: the subject line and the relevance sentence come from the variant that
-// 05_learning assigns to the lead; experimentId and variantId are stamped on the draft.
+// 06_learning assigns to the lead; experimentId and variantId are stamped on the draft.
 
 export interface EmailAdapter {
-  generateDraft(lead: Lead): Promise<EmailDraft>;
+  // asOfMs is the reference time for checking that the recipient's verification is fresh.
+  generateDraft(lead: Lead, context?: { asOfMs?: number }): Promise<EmailDraft>;
 }
 
 export interface EmailOptions {
@@ -91,13 +93,17 @@ export function createMockEmail(options: EmailOptions = {}): EmailAdapter {
   const experiment = options.experiment ?? FIRST_TOUCH_EXPERIMENT;
 
   return {
-    async generateDraft(lead) {
+    async generateDraft(lead, context = {}) {
       if (lead.qualification?.decision !== 'pass') {
         throw new Error(`Refusing to draft for ${lead.companyDomain}: qualification decision is not 'pass'`);
       }
       const data = mergedEnrichmentData(lead);
       const headcount = typeof data.headcount === 'number' ? data.headcount : null;
-      const persona = selectPersona(headcount, personas);
+      // Write for the persona the contact matched; fall back to the one sized for the account.
+      const contactPersona = personas.find(p => p.id === lead.contact?.person?.personaId);
+      const persona = contactPersona ?? selectPersona(headcount, personas);
+      const asOfMs = context.asOfMs ?? Date.now();
+      const to = sendableEmail(lead, asOfMs);
       const company = companyName(lead);
       const scored = scoredSignal(lead);
       const variant = assignVariant(lead.id, experiment);
@@ -134,16 +140,19 @@ export function createMockEmail(options: EmailOptions = {}): EmailAdapter {
       if (variant.reviewNote) reviewNotes.push(variant.reviewNote);
 
       // 3. Offer, 4. one ask, sign-off.
-      const body = ['Hi,', observation, `${relevance}`, offer, cta, `Best,\n${senderName}`].join('\n\n');
+      const firstName = to ? safeText(lead.contact?.person?.fullName.split(/\s+/)[0]) : null;
+      const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
+      const body = [greeting, observation, `${relevance}`, offer, cta, `Best,\n${senderName}`].join('\n\n');
 
       const checks = lint(subject, body, voice);
       for (const check of checks) if (!check.passed) reviewNotes.push(`Voice check '${check.name}' failed: ${check.detail}`);
-      reviewNotes.push('No verified contact email yet: resolve and verify a contact before approving.');
+      const gap = recipientGap(lead, asOfMs);
+      if (gap) reviewNotes.push(`No sendable recipient: ${gap}`);
 
       return EmailDraftSchema.parse({
         status: 'DRAFT',
         requiresApproval: true,
-        to: null,
+        to,
         persona: persona.id,
         experimentId: experiment.id,
         variantId: variant.id,

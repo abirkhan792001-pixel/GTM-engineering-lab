@@ -1,12 +1,12 @@
 import { generateMockCohort, MOCK_AS_OF_MS } from '../01_signals/index';
 import { totalEnrichmentCostInCents } from '../02_enrichment/index';
 import { mockScoreRubric } from '../03_qualification/index';
-import { createMockCRM, createMockEmail, createMockNotifier } from '../04_activation/index';
+import { createMockCRM, createMockEmail, createMockNotifier } from '../05_activation/index';
 import { processLead, type PipelineResult } from '../runPipeline';
 import { FIRST_TOUCH_EXPERIMENT, VARIANT_IDS, type VariantId } from './experiments';
 import { createEventStore, type EngagementEventType, type VariantMetrics } from './tracker';
 
-// Learning runner: 10 synthetic leads through 01 -> 04, then simulated engagement.
+// Learning runner: 10 synthetic leads through 01 -> 05, then simulated engagement.
 // Sends are simulated as if each DRAFT had been approved; nothing is really sent.
 // The outcome plan is injected, and the computed metrics are checked against it.
 
@@ -36,19 +36,21 @@ async function main(): Promise<void> {
   const clocks = {
     enrich: () => MOCK_AS_OF_MS + 60_000,
     qualify: () => MOCK_AS_OF_MS + 120_000,
+    contacts: () => MOCK_AS_OF_MS + 150_000,
     activate: () => MOCK_AS_OF_MS + 180_000,
   };
 
-  console.log(`[05_learning] experiment ${experiment.id}`);
+  console.log(`[06_learning] experiment ${experiment.id}`);
   console.log(`  hypothesis: ${experiment.hypothesis}\n`);
 
   // 1. Full pipeline for every lead.
   const results: PipelineResult[] = [];
   for (const lead of leads) results.push(await processLead(lead, { clocks, adapters, qualify: { scorer: mockScoreRubric } }));
-  const drafted = results.filter(r => r.activation.draft);
+  // Only a draft addressed to a verified contact can be (simulated as) sent.
+  const drafted = results.filter(r => r.activation.draft?.to);
   const spend = results.reduce((sum, r) => sum + totalEnrichmentCostInCents(r.lead), 0);
   const outcomes = results.map(r => r.activation.outcome).reduce<Record<string, number>>((acc, o) => ({ ...acc, [o]: (acc[o] ?? 0) + 1 }), {});
-  console.log(`Pipeline: ${results.length} leads -> ${JSON.stringify(outcomes)}, enrichment ${spend}¢, ${drafted.length} drafts\n`);
+  console.log(`Pipeline: ${results.length} leads -> ${JSON.stringify(outcomes)}, enrichment ${spend}¢, ${drafted.length} drafts with a verified recipient\n`);
 
   // 2. Assignments, straight from the stamped drafts.
   console.log('Assignments:');
@@ -56,7 +58,7 @@ async function main(): Promise<void> {
   for (const r of drafted) {
     const draft = r.activation.draft!;
     byVariant.get(draft.variantId as VariantId)!.push(r);
-    console.log(`  ${r.lead.companyDomain.padEnd(24)} ${draft.variantId.padEnd(24)} "${draft.subject}"`);
+    console.log(`  ${draft.to!.padEnd(38)} ${draft.variantId.padEnd(24)} "${draft.subject}"`);
   }
   const split = VARIANT_IDS.map(id => `${id} ${byVariant.get(id)!.length}`).join(' / ');
   console.log(`  split: ${split}\n`);

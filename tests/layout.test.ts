@@ -19,8 +19,8 @@ function tsFiles(dir: string): string[] {
 }
 
 describe('project layout', () => {
-  it('has the five pipeline stages', () => {
-    assert.deepEqual(STAGES, ['01_signals', '02_enrichment', '03_qualification', '04_activation', '05_learning']);
+  it('has the six pipeline stages', () => {
+    assert.deepEqual(STAGES, ['01_signals', '02_enrichment', '03_qualification', '04_contacts', '05_activation', '06_learning']);
   });
 
   for (const stage of STAGES) {

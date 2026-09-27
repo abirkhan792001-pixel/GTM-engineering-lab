@@ -1,8 +1,8 @@
 import { MOCK_AS_OF_MS } from '../src/01_signals/index';
 import { mockScoreRubric } from '../src/03_qualification/index';
-import { createMockCRM, createMockEmail, createMockNotifier } from '../src/04_activation/index';
-import { assignVariant, type VariantId } from '../src/05_learning/index';
-import type { EnrichmentResult, Lead, Qualification, Signal } from '../src/shared/types';
+import { createMockCRM, createMockEmail, createMockNotifier } from '../src/05_activation/index';
+import { assignVariant, type VariantId } from '../src/06_learning/index';
+import type { Contact, EnrichmentResult, Lead, Qualification, Signal } from '../src/shared/types';
 
 // Shared fixtures for the test suite. Everything is synthetic and deterministic.
 
@@ -24,6 +24,7 @@ export const DAY_MS = 86_400_000;
 export const CLOCKS = {
   enrich: () => NOW + 60_000,
   qualify: () => NOW + 120_000,
+  contacts: () => NOW + 150_000,
   activate: () => NOW + 180_000,
 };
 
@@ -52,6 +53,7 @@ export function makeLead(overrides: Partial<Lead> = {}): Lead {
     signals: [signal()],
     enrichment: [enriched(TARGET_FIRMOGRAPHICS)],
     qualification: null,
+    contact: null,
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
@@ -60,6 +62,23 @@ export function makeLead(overrides: Partial<Lead> = {}): Lead {
 
 export function passQualification(evidence: string[] = ['Fresh hiring signal via job-board [sig_test_001]']): Qualification {
   return { score: 90, decision: 'pass', evidence, missingFields: [] };
+}
+
+// A contact as 04_contacts records it for a verified buyer, verified at NOW.
+export function verifiedContact(overrides: Partial<Contact> = {}): Contact {
+  return {
+    status: 'verified',
+    person: { fullName: 'Lena Hoffmann', title: 'Director of Sales Operations', personaId: 'revops-leader' },
+    email: 'lena.hoffmann@test.example',
+    emailStatus: 'valid',
+    verifiedAt: NOW,
+    steps: [
+      { step: 'person_search', source: 'apollo-people', status: 'found', costInCents: 1 },
+      { step: 'email_finder', source: 'email-finder', status: 'found', costInCents: 2 },
+    ],
+    reason: 'Lena Hoffmann, Director of Sales Operations: email verified',
+    ...overrides,
+  };
 }
 
 // Fresh adapter instances per test, so no state leaks between tests.

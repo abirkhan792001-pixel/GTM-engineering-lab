@@ -1,17 +1,17 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { generateMockSignals } from '../src/01_signals/index';
-import { activateLead, createMockCRM, createMockEmail, createMockNotifier } from '../src/04_activation/index';
-import { assignVariant } from '../src/05_learning/index';
+import { activateLead, createMockCRM, createMockEmail, createMockNotifier } from '../src/05_activation/index';
+import { assignVariant } from '../src/06_learning/index';
 import { processLead } from '../src/runPipeline';
 import { ActivationResultSchema, EmailDraftSchema, type Lead } from '../src/shared/types';
 import { parseVoiceGuidelines, VOICE, VOICE_MARKDOWN } from '../src/shared/voice';
-import { CLOCKS, freshAdapters, makeLead, NOW, OFFLINE, passQualification, signal } from './helpers';
+import { CLOCKS, DAY_MS, freshAdapters, makeLead, NOW, OFFLINE, passQualification, signal, verifiedContact } from './helpers';
 
 const passLead = (overrides: Partial<Lead> = {}) => makeLead({ qualification: passQualification(), ...overrides });
 const activate = (lead: Lead, adapters = freshAdapters()) => activateLead(lead, { ...adapters, now: () => NOW });
 
-describe('04 activation: suppression is checked first', () => {
+describe('05 activation: suppression is checked first', () => {
   const suppressedDomains: [string, RegExp][] = [
     ['brightledger.example', /existing customer/],
     ['harborline.example', /open opportunity/],
@@ -40,7 +40,7 @@ describe('04 activation: suppression is checked first', () => {
   });
 });
 
-describe('04 activation: routing by decision', () => {
+describe('05 activation: routing by decision', () => {
   it('pass -> CRM sync, DRAFT email and a #hot-leads alert', async () => {
     const adapters = freshAdapters();
     const result = await activate(passLead(), adapters);
@@ -88,7 +88,7 @@ describe('04 activation: routing by decision', () => {
   });
 });
 
-describe('04 activation: CRM update rules', () => {
+describe('05 activation: CRM update rules', () => {
   it('upserts idempotently: second sync updates the same records', async () => {
     const adapters = freshAdapters();
     const first = await activate(passLead(), adapters);
@@ -110,7 +110,7 @@ describe('04 activation: CRM update rules', () => {
   });
 });
 
-describe('04 activation: draft formatting and safeguards', () => {
+describe('05 activation: draft formatting and safeguards', () => {
   it('produces a DRAFT that requires approval, with experiment metadata and a clean voice check', async () => {
     const draft = (await activate(passLead())).draft!;
     assert.equal(draft.status, 'DRAFT');
@@ -122,7 +122,7 @@ describe('04 activation: draft formatting and safeguards', () => {
     assert.ok(draft.body.includes('I saw Test is hiring a Head of Sales.'));
     assert.equal((draft.body.match(/\?/g) ?? []).length, 1);
     assert.ok(draft.checks.every(c => c.passed), JSON.stringify(draft.checks));
-    assert.ok(draft.reviewNotes.some(n => n.startsWith('No verified contact email')));
+    assert.ok(draft.reviewNotes.includes('No sendable recipient: No contact lookup has run for this lead.'));
   });
 
   it('refuses to draft for a lead that did not pass', async () => {
@@ -146,7 +146,7 @@ describe('04 activation: draft formatting and safeguards', () => {
   });
 });
 
-describe('04 activation: voice guideline checks', () => {
+describe('05 activation: voice guideline checks', () => {
   it('parses the limits and banned words from voice.md', () => {
     assert.equal(VOICE.firstTouchMaxWords, 90);
     assert.equal(VOICE.subjectMaxWords, 6);
@@ -183,5 +183,64 @@ describe('04 activation: voice guideline checks', () => {
     const text = notifier.outbox[0]!.text;
     assert.ok(text.includes(`*CRM:* ${result.crm!.url} (created)`));
     assert.ok(text.includes(`(${result.draft!.variantId}) awaiting approval`));
+  });
+});
+
+describe('05 activation: recipients from 04_contacts', () => {
+  it('addresses the draft to the verified contact, by first name', async () => {
+    const adapters = freshAdapters();
+    const result = await activate(passLead({ contact: verifiedContact() }), adapters);
+    const draft = result.draft!;
+    assert.equal(draft.to, 'lena.hoffmann@test.example');
+    assert.ok(draft.body.startsWith('Hi Lena,\n\n'));
+    assert.equal(draft.persona, 'revops-leader');
+    assert.ok(!draft.reviewNotes.some(n => n.startsWith('No sendable recipient')));
+    assert.ok(result.alerts[0]!.text.includes('*Contact:* Lena Hoffmann, Director of Sales Operations <lena.hoffmann@test.example> (verified)'));
+  });
+
+  it('writes the contact persona pain point when the buyer matched a different persona', async () => {
+    const founder = verifiedContact({ person: { fullName: 'Paul Wagner', title: 'CEO', personaId: 'growth-founder' }, email: 'paul.wagner@test.example' });
+    const draft = (await activate(passLead({ contact: founder }))).draft!;
+    assert.equal(draft.persona, 'growth-founder');
+    assert.ok(draft.body.startsWith('Hi Paul,'));
+  });
+
+  it('creates a CRM contact record linked to the company', async () => {
+    const adapters = freshAdapters();
+    const result = await activate(passLead({ contact: verifiedContact() }), adapters);
+    assert.equal(result.crm?.contactRecordId, 'contact_lena-hoffmann_test-example');
+    assert.deepEqual(adapters.crm.records.get('test.example')!.contact!.fields.email, 'lena.hoffmann@test.example');
+  });
+
+  it('suppresses the lead when the contact email is on the suppression list', async () => {
+    const adapters = freshAdapters();
+    const optedOut = verifiedContact({ email: 'optout@northwind-data.example' });
+    const result = await activate(passLead({ contact: optedOut }), adapters);
+    assert.equal(result.outcome, 'suppressed');
+    assert.match(result.reason, /optout@northwind-data\.example is on the suppression list/);
+    assert.equal(adapters.crm.records.size, 0);
+  });
+
+  it('leaves the draft unaddressed when verification is older than 7 days', async () => {
+    const stale = verifiedContact({ verifiedAt: NOW - 8 * DAY_MS });
+    const draft = (await activate(passLead({ contact: stale }))).draft!;
+    assert.equal(draft.to, null);
+    assert.ok(draft.body.startsWith('Hi,\n\n'));
+    assert.ok(draft.reviewNotes.some(n => /older than 7 days; re-verify/.test(n)));
+  });
+
+  it('never addresses an unverified (catch-all) contact, and says why', async () => {
+    const catchAll = verifiedContact({
+      status: 'unverified',
+      emailStatus: 'catch_all',
+      verifiedAt: null,
+      reason: "Chris Dunn, Head of Revenue Operations: email status is catch_all, so delivery can't be confirmed",
+      person: { fullName: 'Chris Dunn', title: 'Head of Revenue Operations', personaId: 'revops-leader' },
+      email: 'chris.dunn@test.example',
+    });
+    const result = await activate(passLead({ contact: catchAll }));
+    assert.equal(result.draft!.to, null);
+    assert.ok(result.draft!.reviewNotes.some(n => n.includes('catch_all')));
+    assert.ok(result.alerts[0]!.text.includes('*Contact:* no sendable recipient (found Chris Dunn, Head of Revenue Operations; email catch_all)'));
   });
 });

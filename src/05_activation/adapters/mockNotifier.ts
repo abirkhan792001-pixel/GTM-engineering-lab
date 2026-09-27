@@ -30,6 +30,15 @@ export function formatAlert(lead: Lead, channel: SlackChannel, context: AlertCon
     lines.push(`*Missing fields:* ${q?.missingFields.length ? q.missingFields.join(', ') : 'none (score below pass threshold)'}`);
   }
   lines.push('*Why:*', ...keyEvidence(lead).map(line => `• ${line}`));
+  if (channel === '#hot-leads') {
+    const c = lead.contact;
+    const person = c?.person ? `${c.person.fullName}, ${c.person.title}` : null;
+    lines.push(
+      context.draft?.to
+        ? `*Contact:* ${person} <${context.draft.to}> (verified)`
+        : `*Contact:* no sendable recipient${person ? ` (found ${person}; email ${c?.emailStatus ?? 'missing'})` : ''}. Find one before approving.`,
+    );
+  }
   if (context.crm) lines.push(`*CRM:* ${context.crm.url} (${context.crm.action})`);
   if (context.draft) {
     lines.push(`*Draft:* "${context.draft.subject}" (${context.draft.variantId}) awaiting approval (${context.draft.reviewNotes.length} review note(s))`);

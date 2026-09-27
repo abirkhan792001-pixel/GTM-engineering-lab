@@ -27,7 +27,8 @@ export async function activateLead(lead: Lead, options: ActivateOptions = {}): P
   const log: string[] = [];
   const base = { leadId: lead.id, companyDomain: lead.companyDomain, activatedAt, log };
 
-  const suppression = await crm.checkSuppression({ domain: lead.companyDomain });
+  // Checks the account and, when 04_contacts found one, the contact's email too.
+  const suppression = await crm.checkSuppression({ domain: lead.companyDomain, email: lead.contact?.email ?? null });
   if (suppression.suppressed) {
     const reason = suppression.reason ?? 'Suppressed in CRM';
     log.push(`Suppressed: ${reason}. Halted before CRM sync, drafting or alerts.`);
@@ -38,9 +39,9 @@ export async function activateLead(lead: Lead, options: ActivateOptions = {}): P
   switch (q.decision) {
     case 'pass': {
       const crmSync = await crm.syncContact(lead);
-      log.push(`CRM: ${crmSync.action} company ${crmSync.companyRecordId} and deal ${crmSync.dealId}`);
-      const draft = await email.generateDraft(lead);
-      log.push(`Email: DRAFT "${draft.subject}" created for persona '${draft.persona}', awaiting approval`);
+      log.push(`CRM: ${crmSync.action} company ${crmSync.companyRecordId}, ${crmSync.contactRecordId ? `contact ${crmSync.contactRecordId}, ` : ''}deal ${crmSync.dealId}`);
+      const draft = await email.generateDraft(lead, { asOfMs: activatedAt });
+      log.push(`Email: DRAFT "${draft.subject}" to ${draft.to ?? 'no sendable recipient'} (persona '${draft.persona}'), awaiting approval`);
       const alert = await notifier.sendAlert(lead, '#hot-leads', { sentAt: activatedAt, crm: crmSync, draft });
       log.push(`Slack: alert posted to ${alert.channel}`);
       return ActivationResultSchema.parse({

@@ -33,6 +33,8 @@ interface CompanyRecord {
   companyRecordId: string;
   dealId: string;
   fields: Record<string, unknown>;
+  // The buyer from 04_contacts, linked to the company and deal.
+  contact: { contactRecordId: string; fields: Record<string, unknown> } | null;
 }
 
 const CRM_BASE_URL = 'https://crm.mock.example';
@@ -56,7 +58,7 @@ export function createMockCRM(fixtures: CrmFixtures = DEFAULT_CRM_FIXTURES): Crm
       const key = lead.companyDomain;
       const existing = records.get(key);
       const slug = key.replace(/[^a-z0-9]+/g, '-');
-      const record: CompanyRecord = existing ?? { companyRecordId: `company_${slug}`, dealId: `deal_${slug}`, fields: {} };
+      const record: CompanyRecord = existing ?? { companyRecordId: `company_${slug}`, dealId: `deal_${slug}`, fields: {}, contact: null };
       record.fields = {
         ...record.fields,
         ...mergedEnrichmentData(lead),
@@ -66,10 +68,25 @@ export function createMockCRM(fixtures: CrmFixtures = DEFAULT_CRM_FIXTURES): Crm
         icpEvidence: lead.qualification?.evidence ?? [],
         dealStage: 'Qualified - outreach draft pending approval',
       };
+      const person = lead.contact?.person;
+      if (person) {
+        const contactRecordId = `contact_${person.fullName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}_${slug}`;
+        record.contact = {
+          contactRecordId,
+          fields: {
+            fullName: person.fullName,
+            title: person.title,
+            persona: person.personaId,
+            email: lead.contact?.email ?? null,
+            emailStatus: lead.contact?.emailStatus ?? null,
+          },
+        };
+      }
       records.set(key, record);
       return CrmSyncSchema.parse({
         action: existing ? 'updated' : 'created',
         companyRecordId: record.companyRecordId,
+        contactRecordId: record.contact?.contactRecordId ?? null,
         dealId: record.dealId,
         url: `${CRM_BASE_URL}/companies/${record.companyRecordId}`,
       });

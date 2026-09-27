@@ -40,6 +40,7 @@ jobs:
           npm run signals:dev
           npm run enrich:dev
           npm run qualify:dev
+          npm run contacts:dev
           npm run activate:dev
           npm run pipeline:run
           npm run learn:dev

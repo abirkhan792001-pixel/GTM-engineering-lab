@@ -11,8 +11,9 @@ Slack are mocked; only the Claude scoring step calls a real API.
 | 1. Signals | Collect intent signals (hiring posts, pricing-page visits) | One lead per account |
 | 2. Enrichment | Apollo first (1¢); Firecrawl (5¢) only if data is still missing | Verified company data and cost |
 | 3. Qualification | Dealbreaker rules, then Claude scores against the ICP | Pass, hold or disqualify, with evidence |
-| 4. Activation | Suppression check, then CRM record, email draft and Slack alert | Drafts only; nothing is sent |
-| 5. Learning | A/B test the email angle, track replies and meetings | Winning variant |
+| 4. Contacts | For passing leads only: find the buyer, then find and verify their email | A verified recipient, or the reason there isn't one |
+| 5. Activation | Suppression check, then CRM record, email draft and Slack alert | Drafts addressed to verified contacts; nothing is sent |
+| 6. Learning | A/B test the email angle, track replies and meetings | Winning variant |
 
 ## Project structure
 
@@ -21,11 +22,12 @@ src/
   01_signals/        find accounts showing intent
   02_enrichment/     fill in company data
   03_qualification/  score against the ICP and decide
-  04_activation/     CRM, email draft, Slack alert
-  05_learning/       A/B test the outreach
+  04_contacts/       find and verify the buyer to email
+  05_activation/     CRM, email draft, Slack alert
+  06_learning/       A/B test the outreach
   context/           ICP, personas, voice rules
   shared/            schemas and config loaders
-  runPipeline.ts     run stages 1-4 end to end
+  runPipeline.ts     run stages 1-5 end to end
 tests/               one test file per stage, plus a layout check
 docs/                design notes
 ```
@@ -48,6 +50,7 @@ npm run pipeline:run  # full pipeline on 3 mock leads
 | `npm run signals:dev` | The 3 mock leads |
 | `npm run enrich:dev` | Enrichment path and cost per lead |
 | `npm run qualify:dev` | Decision, score and evidence |
+| `npm run contacts:dev` | Who gets emailed, and why not when no one does |
 | `npm run activate:dev` | What happens for each decision |
 | `npm run learn:dev` | A/B results across 10 leads |
 | `npm run qualify:live` | Real Claude scoring (needs an API key) |
