@@ -23,11 +23,12 @@ const SITES: Record<string, ScrapedProfile> = {
   'quietpeak.example': {
     headcount: 45,
     industry: 'Developer Tools',
-    hqCountry: 'NL',
+    // Remote-first: the site never states an HQ country, so it stays unknown.
+    hqCountry: null,
     techStack: ['HubSpot', 'Segment', 'Snowflake'],
     recentNews: ['Announced Series A funding on the company blog'],
     sources: [
-      { url: 'https://quietpeak.example/about', fact: 'About page: "a team of 45 engineers and operators in Amsterdam"' },
+      { url: 'https://quietpeak.example/about', fact: 'About page: "a fully remote team of 45 engineers and operators"' },
       { url: 'https://quietpeak.example/', fact: 'Homepage headline: "Observability for developer platforms"' },
       { url: 'https://quietpeak.example/careers', fact: 'Job posts list HubSpot, Segment and Snowflake' },
       { url: 'https://quietpeak.example/blog/series-a', fact: 'Blog post announcing Series A' },

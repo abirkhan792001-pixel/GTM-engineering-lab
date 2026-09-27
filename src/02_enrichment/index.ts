@@ -8,11 +8,14 @@ import {
 import { mockApollo } from './providers/mockApollo';
 import { mockFirecrawl } from './providers/mockFirecrawl';
 import type { EnrichmentProvider } from './providers/types';
+import { ICP } from '../shared/icp';
 
 // Waterfall enrichment: always run the cheap database lookup first, and only pay
 // for the deep scraper when critical firmographics are still missing.
 
-export const CRITICAL_FIELDS = ['industry', 'headcount'] as const;
+// The fields the qualification hard gates need (from src/context/icp.json), so the
+// waterfall pays for exactly the data qualification cannot work without.
+export const CRITICAL_FIELDS: readonly string[] = ICP.qualification.requiredFields;
 
 export interface EnrichOptions {
   primary?: EnrichmentProvider;
@@ -23,15 +26,19 @@ export interface EnrichOptions {
 
 // Merge data from every successful result. Earlier (cheaper, already trusted)
 // providers win; later providers only fill gaps and never overwrite a known value.
-export function mergedEnrichmentData(lead: Lead): Record<string, unknown> {
-  const merged: Record<string, unknown> = {};
+export function mergedEnrichmentFields(lead: Lead): Record<string, { value: unknown; source: string }> {
+  const merged: Record<string, { value: unknown; source: string }> = {};
   for (const result of lead.enrichment) {
     if (result.status !== 'enriched' || !result.data) continue;
     for (const [key, value] of Object.entries(result.data)) {
-      if (isPresent(value) && !isPresent(merged[key])) merged[key] = value;
+      if (isPresent(value) && !merged[key]) merged[key] = { value, source: result.source };
     }
   }
   return merged;
+}
+
+export function mergedEnrichmentData(lead: Lead): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(mergedEnrichmentFields(lead)).map(([key, field]) => [key, field.value]));
 }
 
 // Only verified enrichment counts: unverified signal rawData never satisfies a critical field.

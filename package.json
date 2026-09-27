@@ -9,7 +9,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "signals": "tsx src/01_signals/index.ts",
-    "enrich:dev": "tsx src/02_enrichment/run.ts"
+    "enrich:dev": "tsx src/02_enrichment/run.ts",
+    "qualify:dev": "tsx src/03_qualification/run.ts"
   },
   "dependencies": {
     "zod": "^4.6.5"
