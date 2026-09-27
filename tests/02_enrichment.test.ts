@@ -7,8 +7,9 @@ import {
   mergedEnrichmentData,
   missingCriticalFields,
   totalEnrichmentCostInCents,
+  type EnrichmentProvider,
+  type ProviderOutput,
 } from '../src/02_enrichment/index';
-import type { EnrichmentProvider, ProviderOutput } from '../src/02_enrichment/providers/types';
 import type { Lead } from '../src/shared/types';
 import { CLOCKS, makeLead } from './helpers';
 

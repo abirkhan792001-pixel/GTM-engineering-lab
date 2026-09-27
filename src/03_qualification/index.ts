@@ -1,9 +1,22 @@
+// Qualification: cheap deterministic dealbreaker gates first; only leads that pass
+// them reach the ICP evaluator (Claude by default, or an offline scorer).
+
 import { LeadSchema, type Lead } from '../shared/types';
 import { evaluateICP, type EvaluateOptions } from './evaluator';
 import { checkHardGates } from './rules';
 
-// Qualification: cheap deterministic dealbreaker gates first; only leads that pass
-// them reach the (eventually paid) ICP evaluator.
+export { checkHardGates } from './rules';
+export {
+  DEFAULT_QUALIFIER_MODEL,
+  decide,
+  evaluateICP,
+  mockScoreRubric,
+  type ClaudeClient,
+  type EvaluateOptions,
+  type RubricResult,
+  type RubricScorer,
+} from './evaluator';
+
 
 export interface QualifyOptions extends Omit<EvaluateOptions, 'asOfMs'> {
   // Injected clock: used both as the signal-freshness reference and for updatedAt.

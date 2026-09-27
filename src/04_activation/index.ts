@@ -3,6 +3,10 @@ import { mockCRM, type CrmAdapter } from './adapters/mockCRM';
 import { mockEmail, type EmailAdapter } from './adapters/mockEmail';
 import { mockNotifier, type NotifierAdapter } from './adapters/mockNotifier';
 
+export { createMockCRM, type CrmAdapter } from './adapters/mockCRM';
+export { createMockEmail, type EmailAdapter } from './adapters/mockEmail';
+export { createMockNotifier, type NotifierAdapter } from './adapters/mockNotifier';
+
 // Activation routing. Suppression is checked first for every lead, whatever its
 // decision; a suppressed lead gets no CRM write, draft or alert. Nothing here sends
 // email: a 'pass' ends at a DRAFT that needs human approval.

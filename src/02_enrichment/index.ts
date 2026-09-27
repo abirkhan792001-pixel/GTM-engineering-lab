@@ -8,6 +8,8 @@ import {
 import { mockApollo } from './providers/mockApollo';
 import { mockFirecrawl } from './providers/mockFirecrawl';
 import type { EnrichmentProvider } from './providers/types';
+
+export type { EnrichmentProvider, ProviderInput, ProviderOutput } from './providers/types';
 import { ICP } from '../shared/icp';
 
 // Waterfall enrichment: always run the cheap database lookup first, and only pay

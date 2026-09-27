@@ -3,9 +3,15 @@ import { describe, it } from 'node:test';
 import Anthropic from '@anthropic-ai/sdk';
 import { generateMockSignals } from '../src/01_signals/index';
 import { enrichLead } from '../src/02_enrichment/index';
-import { decide, DEFAULT_QUALIFIER_MODEL, evaluateICP, mockScoreRubric, type ClaudeClient } from '../src/03_qualification/evaluator';
-import { qualifyLead } from '../src/03_qualification/index';
-import { checkHardGates } from '../src/03_qualification/rules';
+import {
+  checkHardGates,
+  decide,
+  DEFAULT_QUALIFIER_MODEL,
+  evaluateICP,
+  mockScoreRubric,
+  qualifyLead,
+  type ClaudeClient,
+} from '../src/03_qualification/index';
 import { ICP, IcpSchema } from '../src/shared/icp';
 import type { Lead, Qualification } from '../src/shared/types';
 import { CLOCKS, enriched, makeLead, NOW, OFFLINE, signal, TARGET_FIRMOGRAPHICS } from './helpers';

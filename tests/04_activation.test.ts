@@ -1,11 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { generateMockSignals } from '../src/01_signals/index';
-import { createMockCRM } from '../src/04_activation/adapters/mockCRM';
-import { createMockEmail } from '../src/04_activation/adapters/mockEmail';
-import { createMockNotifier } from '../src/04_activation/adapters/mockNotifier';
-import { activateLead } from '../src/04_activation/index';
-import { assignVariant } from '../src/05_learning/experiments';
+import { activateLead, createMockCRM, createMockEmail, createMockNotifier } from '../src/04_activation/index';
+import { assignVariant } from '../src/05_learning/index';
 import { processLead } from '../src/runPipeline';
 import { ActivationResultSchema, EmailDraftSchema, type Lead } from '../src/shared/types';
 import { parseVoiceGuidelines, VOICE, VOICE_MARKDOWN } from '../src/shared/voice';

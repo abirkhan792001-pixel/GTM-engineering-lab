@@ -1,59 +1,83 @@
 # GTM-engineering-lab
-A code-first Go-To-Market (GTM) engineering framework built in TypeScript. Captures intent signals, runs waterfall enrichment (Apollo, Firecrawl), qualifies leads via LLM scoring (Claude + Zod), and triggers CRM and email activation. A hands-on reference architecture for modern revenue infrastructure and programmatic growth.
+
+A code-first go-to-market pipeline in TypeScript: find accounts showing intent, enrich them,
+qualify them with Claude, and hand the good ones to sales. Data providers, CRM, email and
+Slack are mocked; only the Claude scoring step calls a real API.
+
+## How it works
+
+| Stage | What happens | Result |
+|---|---|---|
+| 1. Signals | Collect intent signals (hiring posts, pricing-page visits) | One lead per account |
+| 2. Enrichment | Apollo first (1¢); Firecrawl (5¢) only if data is still missing | Verified company data and cost |
+| 3. Qualification | Dealbreaker rules, then Claude scores against the ICP | Pass, hold or disqualify, with evidence |
+| 4. Activation | Suppression check, then CRM record, email draft and Slack alert | Drafts only; nothing is sent |
+| 5. Learning | A/B test the email angle, track replies and meetings | Winning variant |
 
 ## Project structure
 
 ```
 src/
-  01_signals/        intent signal intake (mock generator for now)
-  02_enrichment/     waterfall enrichment: Apollo first, Firecrawl only if ICP-required fields are missing (mock providers)
-  03_qualification/  hard-gate dealbreakers (rules.ts), then Claude scoring with Zod-validated structured output (evaluator.ts)
-  04_activation/     suppression check, then routing: pass -> CRM + email DRAFT + #hot-leads; hold -> #manual-review; disqualify -> inactive (mock CRM/Resend/Slack adapters)
-  05_learning/       deterministic A/B assignment (experiments.ts), engagement tracking and variant metrics (tracker.ts)
-  context/           ICP (icp.json), buyer personas (personas.json), voice/copy rules (voice.md)
-  shared/types.ts    Zod contracts: Signal, EnrichmentResult, Qualification, Lead
-  shared/            validated loaders for icp.json, personas.json and the rules in voice.md
-  runPipeline.ts     end-to-end runner for stages 01 -> 04
-tests/               node:test suites per stage (01-05) plus shared fixtures
-docs/                design notes (see reference-architecture-notes.md)
-.github/workflows/  CI (typecheck, tests, offline smoke runs) and a manual live-API check
+  01_signals/        find accounts showing intent
+  02_enrichment/     fill in company data
+  03_qualification/  score against the ICP and decide
+  04_activation/     CRM, email draft, Slack alert
+  05_learning/       A/B test the outreach
+  context/           ICP, personas, voice rules
+  shared/            schemas and config loaders
+  runPipeline.ts     run stages 1-4 end to end
+tests/               one test file per stage, plus a layout check
+docs/                design notes
 ```
 
-## Run
+Every stage folder has the same shape: `index.ts` is its entry point (other code imports
+only this), `run.ts` is an offline demo, and anything else is internal to the stage.
+
+## Quick start
 
 Requires Node.js 22+.
 
 ```sh
 npm install
-npm test            # node:test suites for stages 01-05 (via tsx)
-npm run typecheck   # tsc --noEmit (src and tests)
-npm run signals     # emit 3 mock leads validated against LeadSchema
-npm run enrich:dev  # run the mock leads through the enrichment waterfall, with cost per lead
-npm run qualify:dev # signals -> enrichment -> qualification: decision, score, evidence, missing fields
-npm run activate:dev   # activation routing for each decision, plus a suppressed existing customer
-npm run pipeline:run   # full 01 -> 04 run with a per-lead report; nothing is ever sent
-npm run learn:dev      # 10-lead cohort through 01 -> 04, simulated engagement, A vs B performance table
+npm test              # all tests, offline
+npm run pipeline:run  # full pipeline on 3 mock leads
 ```
 
-## Live qualification (Anthropic API)
+| Command | Shows |
+|---|---|
+| `npm run signals:dev` | The 3 mock leads |
+| `npm run enrich:dev` | Enrichment path and cost per lead |
+| `npm run qualify:dev` | Decision, score and evidence |
+| `npm run activate:dev` | What happens for each decision |
+| `npm run learn:dev` | A/B results across 10 leads |
+| `npm run qualify:live` | Real Claude scoring (needs an API key) |
 
-`evaluateICP` calls Claude (`claude-sonnet-5` by default) with the `icp.json` rubric, the lead's
-verified enrichment and its signal history, and requests structured output in the
-`QualificationSchema` shape. The model's decision is a recommendation: the final call goes
-through the deterministic thresholds in `decide()`, and missing required fields are re-checked
-in code. API errors, refusals, truncation or malformed output fall back to a safe `hold`.
+Everything except `qualify:live` runs offline on mock data.
 
-The dev runners and `npm test` never call the API: runners use the offline scorer and tests
-inject a fake client. To exercise the real API:
+## Claude scoring
+
+Leads that pass the dealbreaker rules go to `claude-sonnet-5`, which returns a score, a
+decision and evidence. Claude recommends; code decides: the thresholds in `icp.json` make the
+final call, and missing data is double-checked. If the API fails or returns bad output, the
+lead is held for review.
 
 ```sh
-cp .env.example .env    # add ANTHROPIC_API_KEY (optional: QUALIFIER_MODEL)
-npm run qualify:live    # 2 requests; skips cleanly without a key
+cp .env.example .env    # add your ANTHROPIC_API_KEY
+npm run qualify:live    # 2 API calls
 ```
+
+## Customize
+
+Edit the files in `src/context/` to fit your market:
+
+- `icp.json`: target industries, company size, countries, dealbreakers and scoring
+- `personas.json`: buyer titles and pain points
+- `voice.md`: tone and email rules, which drafts are checked against
 
 ## CI
 
-- `.github/workflows/ci.yml` runs on every push and pull request: `npm ci`, typecheck, tests,
-  and the offline runners. No secrets needed, no API calls.
-- `.github/workflows/live-qualification.yml` is manual (Actions > Live qualification > Run
-  workflow). It needs an `ANTHROPIC_API_KEY` repository secret and spends a few API credits.
+- **CI** runs typecheck, tests and the offline demos on every push and pull request.
+- **Live qualification** runs `qualify:live` on demand. It needs an `ANTHROPIC_API_KEY`
+  repository secret and spends a few API credits.
+
+See `docs/reference-architecture-notes.md` for the design background.

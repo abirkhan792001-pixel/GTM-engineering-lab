@@ -1,9 +1,7 @@
 import { MOCK_AS_OF_MS } from '../src/01_signals/index';
-import { mockScoreRubric } from '../src/03_qualification/evaluator';
-import { createMockCRM } from '../src/04_activation/adapters/mockCRM';
-import { createMockEmail } from '../src/04_activation/adapters/mockEmail';
-import { createMockNotifier } from '../src/04_activation/adapters/mockNotifier';
-import { assignVariant, type VariantId } from '../src/05_learning/experiments';
+import { mockScoreRubric } from '../src/03_qualification/index';
+import { createMockCRM, createMockEmail, createMockNotifier } from '../src/04_activation/index';
+import { assignVariant, type VariantId } from '../src/05_learning/index';
 import type { EnrichmentResult, Lead, Qualification, Signal } from '../src/shared/types';
 
 // Shared fixtures for the test suite. Everything is synthetic and deterministic.

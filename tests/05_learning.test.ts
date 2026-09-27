@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { generateMockCohort } from '../src/01_signals/index';
-import { assignVariant, FIRST_TOUCH_EXPERIMENT, renderTemplate, VARIANT_IDS } from '../src/05_learning/experiments';
-import { createEventStore, type EngagementEventType } from '../src/05_learning/tracker';
+import {
+  assignVariant,
+  createEventStore,
+  FIRST_TOUCH_EXPERIMENT,
+  renderTemplate,
+  VARIANT_IDS,
+  type EngagementEventType,
+} from '../src/05_learning/index';
 import { processLead } from '../src/runPipeline';
 import { CLOCKS, freshAdapters, idsByVariant, OFFLINE } from './helpers';
 
