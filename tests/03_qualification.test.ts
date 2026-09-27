@@ -257,6 +257,25 @@ describe('03 qualification: Claude evaluator (mocked API)', () => {
     assert.equal(q.score, 60);
   });
 
+  it('ignores a claim that a verified required field is missing, with a note', async () => {
+    // What llama3.2 did on Northwind: cited all three fields, then listed them as missing.
+    const { client } = fakeClaude(reply({ ...NORTHWIND_OUTPUT, score: 80, decision: 'hold', missingFields: ['industry', 'headcount', 'hqCountry'] }));
+    const q = await qualifyWith(await enrichedMock(0), client);
+    assert.equal(q.decision, 'pass');
+    assert.equal(q.score, 80);
+    assert.deepEqual(q.missingFields, []);
+    assert.ok(q.evidence.includes('Model reported industry, headcount, hqCountry as missing, but verified enrichment has them; ignored'));
+    assert.ok(q.evidence.includes("Model recommended 'hold'; policy applied 'pass'"));
+  });
+
+  it('still holds when the model rightly reports a required field missing', async () => {
+    const { client } = fakeClaude(reply({ score: 70, decision: 'hold', evidence: ['No HQ country'], missingFields: ['hqCountry'] }));
+    const q = await qualifyWith(await enrichedMock(1), client);
+    assert.equal(q.decision, 'hold');
+    assert.deepEqual(q.missingFields, ['hqCountry']);
+    assert.ok(!q.evidence.some(e => e.includes('but verified enrichment has')));
+  });
+
   it('keeps non-required unknowns as a note without blocking a pass', async () => {
     const { client } = fakeClaude(reply({ ...NORTHWIND_OUTPUT, missingFields: ['techStack'] }));
     const q = await qualifyWith(await enrichedMock(0), client);

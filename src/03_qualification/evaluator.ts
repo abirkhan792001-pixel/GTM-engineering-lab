@@ -97,11 +97,14 @@ async function evaluateWithClaude(lead: Lead, ctx: EvaluationContext, options: E
   return applyPolicy(checked.data, requiredMissing, model, ctx.icp);
 }
 
-// Deterministic guardrails on the model's answer: required-field gaps are the union of
-// what the model reported and what enrichment actually lacks, and decide() makes the call.
+// Deterministic guardrails on the model's answer: required-field gaps come only from what
+// verified enrichment actually lacks, and decide() makes the call. The model sees nothing
+// that enrichment doesn't hold, so when it calls a field missing that enrichment has, it is
+// wrong (small local models do this): the claim is noted but doesn't hold the lead.
 export function applyPolicy(llm: Qualification, requiredMissing: string[], model: string, icp: Icp = ICP): Qualification {
   const required = icp.qualification.requiredFields;
-  const missingFields = required.filter(field => llm.missingFields.includes(field) || requiredMissing.includes(field));
+  const missingFields = required.filter(field => requiredMissing.includes(field));
+  const wronglyMissing = llm.missingFields.filter(field => required.includes(field) && !requiredMissing.includes(field));
   const otherMissing = llm.missingFields.filter(field => !required.includes(field));
   const weightFor: Record<string, number> = {
     industry: icp.scoring.weights.industry,
@@ -109,6 +112,7 @@ export function applyPolicy(llm: Qualification, requiredMissing: string[], model
     hqCountry: icp.scoring.weights.country,
   };
   const evidence = [`Scored by ${model} against rubric ${icp.version}`, ...llm.evidence];
+  if (wronglyMissing.length) evidence.push(`Model reported ${wronglyMissing.join(', ')} as missing, but verified enrichment has ${wronglyMissing.length === 1 ? 'it' : 'them'}; ignored`);
   if (otherMissing.length) evidence.push(`Model also noted unknown: ${otherMissing.join(', ')}`);
 
   const result = decide(
