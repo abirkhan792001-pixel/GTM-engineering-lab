@@ -14,6 +14,7 @@ src/
   shared/types.ts    Zod contracts: Signal, EnrichmentResult, Qualification, Lead
   shared/            validated loaders for icp.json, personas.json and the rules in voice.md
   runPipeline.ts     end-to-end runner for stages 01 -> 04
+tests/               node:test suites per stage (01-05) plus shared fixtures
 docs/                design notes (see reference-architecture-notes.md)
 ```
 
@@ -23,7 +24,8 @@ Requires Node.js 22+.
 
 ```sh
 npm install
-npm run typecheck   # tsc --noEmit
+npm test            # node:test suites for stages 01-05 (via tsx)
+npm run typecheck   # tsc --noEmit (src and tests)
 npm run signals     # emit 3 mock leads validated against LeadSchema
 npm run enrich:dev  # run the mock leads through the enrichment waterfall, with cost per lead
 npm run qualify:dev # signals -> enrichment -> qualification: decision, score, evidence, missing fields
