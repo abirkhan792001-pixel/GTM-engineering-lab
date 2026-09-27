@@ -29,6 +29,7 @@ src/
   shared/            schemas and config loaders
   runPipeline.ts     run stages 1-5 end to end
   runtime.ts         pick mock or live integrations from the config
+reports/             generated PDF briefs (git-ignored)
 tests/               one test file per stage, plus a layout check
 docs/                design notes
 ```
@@ -57,6 +58,7 @@ npm run pipeline:run  # full pipeline on 3 mock leads
 | `npm run learn:dev` | A/B results across 10 leads |
 | `npm run qualify:live` | Real Claude scoring (needs an API key) |
 | `npm run server:dev` | Webhook server on port 3000 (see below) |
+| `npm run report:pdf` | Full pipeline plus a PDF executive brief in `reports/` |
 
 Everything runs offline on mock data unless you set `MOCK_MODE=false` or run `qualify:live`.
 
@@ -124,6 +126,17 @@ curl -X POST localhost:3000/api/drafts/<draftId>/approve \
 In live mode, sending uses Resend and the approval endpoints need `APPROVAL_TOKEN`; without it
 they're disabled. In mock mode, approved emails land in a mock outbox. The queue is kept in
 memory, so pending drafts are lost when the server restarts.
+
+## Executive PDF brief
+
+`npm run report:pdf` runs the pipeline and writes `reports/gtm-brief-procuros.pdf`: headline
+metrics (leads processed, pass rate, enrichment cost, winning A/B variant), an outcome table for
+every lead, and profiles of the top qualified prospects with their score, evidence, verified
+buyer and outreach draft. Pass `--out <path>` to write elsewhere.
+
+The brief stays at 1-2 pages by profiling the two highest scorers; everyone else is in the
+outcome table. Runs on mock data carry a demo banner, and the A/B card only names a winner once
+there is engagement data behind it. The layout code is in `src/shared/pdfReporter.ts`.
 
 ## Customize
 

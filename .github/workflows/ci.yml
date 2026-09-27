@@ -44,6 +44,8 @@ jobs:
           npm run activate:dev
           npm run pipeline:run
           npm run learn:dev
+          npm run report:pdf
+          test -s reports/gtm-brief-procuros.pdf
 
       # Boot the webhook server in mock mode, post a signal, wait for the pipeline result,
       # then approve the draft and check it was sent.

@@ -17,15 +17,18 @@
     "activate:dev": "tsx src/05_activation/run.ts",
     "pipeline:run": "tsx src/runPipeline.ts",
     "learn:dev": "tsx src/06_learning/run.ts",
-    "server:dev": "tsx src/01_signals/server.ts"
+    "server:dev": "tsx src/01_signals/server.ts",
+    "report:pdf": "tsx src/runPipeline.ts --export-pdf"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",
     "@mendable/firecrawl-js": "^4.41.0",
+    "pdfkit": "^0.20.2",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",
+    "@types/pdfkit": "^0.17.6",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3"
   }
