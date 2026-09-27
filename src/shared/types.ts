@@ -72,11 +72,56 @@ export const QualificationSchema = z
 export type Qualification = z.infer<typeof QualificationSchema>;
 
 // ---------------------------------------------------------------------------
+// 04 Contacts
+// ---------------------------------------------------------------------------
+
+export const EmailStatusSchema = z.enum(['valid', 'catch_all', 'invalid', 'unknown']);
+export type EmailStatus = z.infer<typeof EmailStatusSchema>;
+
+export const PersonSchema = z.strictObject({
+  fullName: NonEmptyString,
+  title: NonEmptyString,
+  // The persona (from personas.json) whose target titles this person matched.
+  personaId: NonEmptyString,
+});
+export type Person = z.infer<typeof PersonSchema>;
+
+export const ContactLookupStepSchema = z.strictObject({
+  step: z.enum(['person_search', 'email_finder']),
+  source: NonEmptyString,
+  status: z.enum(['found', 'not_found', 'failed']),
+  costInCents: z.number().int().nonnegative(),
+});
+export type ContactLookupStep = z.infer<typeof ContactLookupStepSchema>;
+
+// The buyer to address at an account. Only a 'verified' contact is a sendable recipient.
+export const ContactSchema = z
+  .strictObject({
+    status: z.enum(['verified', 'unverified', 'not_found']),
+    person: PersonSchema.nullable(),
+    email: z.email().nullable(),
+    emailStatus: EmailStatusSchema.nullable(),
+    verifiedAt: EpochMs.nullable(),
+    steps: z.array(ContactLookupStepSchema).min(1),
+    reason: NonEmptyString,
+  })
+  .superRefine((c, ctx) => {
+    const fail = (message: string) => ctx.addIssue({ code: 'custom', message: `${c.status}: ${message}` });
+    if (c.status === 'verified' && (!c.person || !c.email || c.emailStatus !== 'valid' || c.verifiedAt === null)) {
+      fail('requires a person, an email with status valid, and verifiedAt');
+    }
+    if (c.status === 'unverified' && !c.person) fail('requires the person that was found');
+    if (c.status === 'not_found' && (c.person || c.email)) fail('must not carry a person or email');
+  });
+export type Contact = z.infer<typeof ContactSchema>;
+
+// ---------------------------------------------------------------------------
 // Lead: one account moving through the pipeline
 // ---------------------------------------------------------------------------
 
-// A lead's state is defined by which stages have filled their fields:
-// enrichment is empty until 02 runs, qualification is null until 03 runs.
+// A lead's state is defined by which stages have filled their fields: enrichment is
+// empty until 02 runs, qualification is null until 03 runs, and contact is null until
+// 04 runs (it only runs for leads that passed qualification).
 export const LeadSchema = z.strictObject({
   id: NonEmptyString,
   companyDomain: CompanyDomainSchema,
@@ -84,23 +129,24 @@ export const LeadSchema = z.strictObject({
   signals: z.array(SignalSchema).min(1),
   enrichment: z.array(EnrichmentResultSchema),
   qualification: QualificationSchema.nullable(),
+  contact: ContactSchema.nullable(),
   createdAt: EpochMs,
   updatedAt: EpochMs,
 });
 export type Lead = z.infer<typeof LeadSchema>;
 
 // ---------------------------------------------------------------------------
-// 04 Activation
+// 05 Activation
 // ---------------------------------------------------------------------------
 
 export const EmailDraftSchema = z.strictObject({
   // Safeguard: a draft can only ever be a DRAFT awaiting human approval.
   status: z.literal('DRAFT'),
   requiresApproval: z.literal(true),
-  // Null until a verified contact email is resolved; a draft without one cannot be approved.
+  // The verified contact's email from 04_contacts; null when there is no sendable recipient.
   to: z.email().nullable(),
   persona: NonEmptyString,
-  // A/B assignment stamped by 05_learning; carried through to engagement events.
+  // A/B assignment stamped by 06_learning; carried through to engagement events.
   experimentId: NonEmptyString,
   variantId: NonEmptyString,
   subject: NonEmptyString,
@@ -124,6 +170,8 @@ export type SlackAlert = z.infer<typeof SlackAlertSchema>;
 export const CrmSyncSchema = z.strictObject({
   action: z.enum(['created', 'updated']),
   companyRecordId: NonEmptyString,
+  // Null when no contact person was found for the account.
+  contactRecordId: NonEmptyString.nullable(),
   dealId: NonEmptyString,
   url: z.url(),
 });

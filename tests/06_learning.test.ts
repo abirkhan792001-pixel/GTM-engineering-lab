@@ -8,7 +8,7 @@ import {
   renderTemplate,
   VARIANT_IDS,
   type EngagementEventType,
-} from '../src/05_learning/index';
+} from '../src/06_learning/index';
 import { processLead } from '../src/runPipeline';
 import { CLOCKS, freshAdapters, idsByVariant, OFFLINE } from './helpers';
 
@@ -20,7 +20,7 @@ const event = (leadId: string, eventType: EngagementEventType, timestamp = TS) =
   timestamp,
 });
 
-describe('05 learning: deterministic variant assignment', () => {
+describe('06 learning: deterministic variant assignment', () => {
   it('always gives the same lead the same variant', () => {
     for (let i = 0; i < 50; i++) assert.equal(assignVariant(`lead_${i}`).id, assignVariant(`lead_${i}`).id);
   });
@@ -63,7 +63,7 @@ describe('05 learning: deterministic variant assignment', () => {
   });
 });
 
-describe('05 learning: event ingestion', () => {
+describe('06 learning: event ingestion', () => {
   const ids = idsByVariant(3);
   const [a0, a1] = ids.variant_a_pain;
 
@@ -100,7 +100,7 @@ describe('05 learning: event ingestion', () => {
   });
 });
 
-describe('05 learning: metrics and winner selection', () => {
+describe('06 learning: metrics and winner selection', () => {
   const ids = idsByVariant(5);
   const A = ids.variant_a_pain;
   const B = ids.variant_b_social_proof;

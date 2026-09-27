@@ -48,6 +48,7 @@ function mockLeads(asOfMs: number): MockLead[] {
         ],
         enrichment: [],
         qualification: null,
+        contact: null,
         createdAt: asOfMs,
         updatedAt: asOfMs,
       },
@@ -69,6 +70,7 @@ function mockLeads(asOfMs: number): MockLead[] {
         ],
         enrichment: [],
         qualification: null,
+        contact: null,
         createdAt: asOfMs,
         updatedAt: asOfMs,
       },
@@ -96,6 +98,7 @@ function mockLeads(asOfMs: number): MockLead[] {
         ],
         enrichment: [],
         qualification: null,
+        contact: null,
         createdAt: asOfMs,
         updatedAt: asOfMs,
       },
@@ -114,7 +117,7 @@ export function generateMockSignals(asOfMs: number = MOCK_AS_OF_MS): { scenario:
 }
 
 // Ten synthetic ICP-fit accounts, each with one fresh hiring signal. Used by the
-// 05_learning A/B runner so a full batch reaches activation and gets drafted.
+// 06_learning A/B runner so a full batch reaches activation and gets drafted.
 export function generateMockCohort(asOfMs: number = MOCK_AS_OF_MS): Lead[] {
   return LEARNING_COHORT.map(company => {
     const slug = company.domain.split('.')[0]!;
@@ -131,6 +134,7 @@ export function generateMockCohort(asOfMs: number = MOCK_AS_OF_MS): Lead[] {
       ],
       enrichment: [],
       qualification: null,
+      contact: null,
       createdAt: asOfMs,
       updatedAt: asOfMs,
     });
