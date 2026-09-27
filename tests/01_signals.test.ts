@@ -4,6 +4,7 @@ import type { Server } from 'node:http';
 import { afterEach, describe, it } from 'node:test';
 import { generateMockCohort, generateMockSignals, IntakeError, IntentSignalSchema, intentToLead, MOCK_AS_OF_MS, normalizeDomain } from '../src/01_signals/index';
 import { createSignalServer } from '../src/01_signals/server';
+import { createApprovalService, createMockSender } from '../src/05_activation/index';
 import { buildRuntime } from '../src/runtime';
 import { loadConfig } from '../src/shared/config';
 import { EnrichmentResultSchema, LeadSchema, QualificationSchema, SignalSchema } from '../src/shared/types';
@@ -204,5 +205,99 @@ describe('01 signals: webhook server', () => {
     await start();
     const health = (await (await fetch(`${base}/health`)).json()) as { status: string; mode: string };
     assert.deepEqual([health.status, health.mode], ['ok', 'mock']);
+  });
+});
+
+describe('01 signals: draft approval endpoints', () => {
+  let server: Server;
+  let base = '';
+  let sender: ReturnType<typeof createMockSender>;
+  const TOKEN = 'approval-token-for-tests';
+
+  async function start(options: { mode?: 'mock' | 'live'; token?: string } = {}) {
+    const runtime = buildRuntime(loadConfig({}));
+    sender = createMockSender();
+    const approvals = createApprovalService({ sender, crm: runtime.crm });
+    ({ server } = createSignalServer({ runtime: { ...runtime, mode: options.mode ?? 'mock' }, approvals, approvalToken: options.token, log: () => {} }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  }
+  afterEach(() => new Promise<void>(resolve => server.close(() => resolve())));
+
+  const auth = (token?: string): Record<string, string> => (token ? { authorization: `Bearer ${token}` } : {});
+  const getJson = async (path: string, token?: string) => {
+    const res = await fetch(`${base}${path}`, { headers: auth(token) });
+    return { status: res.status, body: (await res.json()) as Record<string, any> };
+  };
+  const postJson = async (path: string, body: unknown, token?: string) => {
+    const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...auth(token) }, body: JSON.stringify(body) });
+    return { status: res.status, body: (await res.json()) as Record<string, any> };
+  };
+
+  // Posts a signal for northwind and waits until its draft is registered.
+  async function pendingDraft(token?: string) {
+    const { body } = await postJson('/api/webhooks/signal', { eventType: 'contact_form', source: 'website', email: 'lena.hoffmann@northwind-data.example' });
+    for (let i = 0; i < 100; i++) {
+      const job = await getJson(`/api/leads/${body.leadId}`);
+      if (job.body.status === 'done') return (await getJson(`/api/drafts/${job.body.result.draftId}`, token)).body;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error('draft never registered');
+  }
+
+  it('lists a pending draft, then approving it sends to the prospect', async () => {
+    await start();
+    const draft = await pendingDraft();
+    assert.equal(draft.status, 'pending_approval');
+    assert.match(draft.contentHash, /^[0-9a-f]{64}$/);
+    const pending = await getJson('/api/drafts?status=pending_approval');
+    assert.deepEqual(pending.body.drafts.map((d: { id: string }) => d.id), [draft.id]);
+
+    const approved = await postJson(`/api/drafts/${draft.id}/approve`, { approvedBy: 'Abir', contentHash: draft.contentHash, acknowledgeReviewNotes: true });
+    assert.equal(approved.status, 200);
+    assert.equal(approved.body.status, 'sent');
+    assert.deepEqual(approved.body.history.map((h: { action: string }) => h.action), ['created', 'approved', 'sent']);
+    assert.deepEqual(sender.outbox.map(e => e.to), ['lena.hoffmann@northwind-data.example']);
+
+    const again = await postJson(`/api/drafts/${draft.id}/approve`, { approvedBy: 'Abir', contentHash: draft.contentHash, acknowledgeReviewNotes: true });
+    assert.equal(again.status, 409);
+    assert.equal(sender.outbox.length, 1);
+  });
+
+  it('maps refusals to HTTP status codes and sends nothing', async () => {
+    await start();
+    const draft = await pendingDraft();
+    assert.equal((await postJson(`/api/drafts/${draft.id}/approve`, { approvedBy: 'Abir', contentHash: '0'.repeat(64), acknowledgeReviewNotes: true })).status, 409);
+    assert.equal((await postJson(`/api/drafts/${draft.id}/approve`, { approvedBy: 'Abir', contentHash: draft.contentHash })).status, 400);
+    assert.equal((await postJson('/api/drafts/draft_nope/approve', { approvedBy: 'Abir', contentHash: draft.contentHash })).status, 404);
+    assert.equal((await getJson('/api/drafts?status=bogus')).status, 400);
+    assert.equal((await fetch(`${base}/api/drafts/${draft.id}/approve`)).status, 405);
+    assert.equal(sender.outbox.length, 0);
+  });
+
+  it('rejects a draft through the API', async () => {
+    await start();
+    const draft = await pendingDraft();
+    const rejected = await postJson(`/api/drafts/${draft.id}/reject`, { rejectedBy: 'Abir', reason: 'Wrong persona' });
+    assert.deepEqual([rejected.status, rejected.body.status], [200, 'rejected']);
+    assert.equal(sender.outbox.length, 0);
+  });
+
+  it('requires the approval token when one is configured', async () => {
+    await start({ token: TOKEN });
+    const draft = await pendingDraft(TOKEN);
+    assert.equal((await getJson('/api/drafts')).status, 401);
+    assert.equal((await getJson('/api/drafts', 'wrong-token-of-some-length')).status, 401);
+    assert.equal((await postJson(`/api/drafts/${draft.id}/approve`, { approvedBy: 'x', contentHash: draft.contentHash, acknowledgeReviewNotes: true })).status, 401);
+    assert.equal(sender.outbox.length, 0);
+    const ok = await postJson(`/api/drafts/${draft.id}/approve`, { approvedBy: 'x', contentHash: draft.contentHash, acknowledgeReviewNotes: true }, TOKEN);
+    assert.equal(ok.body.status, 'sent');
+  });
+
+  it('disables approvals in live mode when no token is configured', async () => {
+    await start({ mode: 'live' });
+    const res = await getJson('/api/drafts');
+    assert.equal(res.status, 503);
+    assert.match(res.body.error, /set APPROVAL_TOKEN/);
   });
 });

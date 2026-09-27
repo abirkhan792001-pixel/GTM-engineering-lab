@@ -36,6 +36,9 @@ export const ConfigSchema = z.object({
   HUBSPOT_API_KEY: Optional,
   // If set, the webhook server requires this value in the x-webhook-secret header.
   WEBHOOK_SECRET: Optional,
+  // Bearer token for the draft approval endpoints. Required in live mode: approving sends
+  // real email to prospects, and drafts contain prospect data.
+  APPROVAL_TOKEN: Optional.pipe(z.string().min(16, 'APPROVAL_TOKEN must be at least 16 characters').optional()),
   PORT: z.coerce.number().int().min(0).max(65535).default(3000),
 });
 export type Config = z.infer<typeof ConfigSchema>;

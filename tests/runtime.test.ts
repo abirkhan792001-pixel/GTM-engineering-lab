@@ -36,6 +36,7 @@ describe('config', () => {
     ['a malformed Slack URL', { SLACK_WEBHOOK_URL: 'not a url' }],
     ['a malformed review email', { DRAFT_REVIEW_EMAIL: 'nope' }],
     ['an out-of-range port', { PORT: '70000' }],
+    ['a short approval token', { APPROVAL_TOKEN: 'short' }],
   ] as const) {
     it(`fails loudly on ${name}`, () => {
       assert.throws(() => loadConfig(env), /Invalid configuration/);
@@ -77,6 +78,24 @@ describe('runtime: choosing mock or live integrations', () => {
     assert.equal(runtime.integrations.slack, 'live (incoming webhook)');
     assert.equal(runtime.integrations.draftReview, 'live (resend, to review@lab.example)');
     assert.equal(runtime.integrations.qualification, 'offline scorer', 'no ANTHROPIC_API_KEY in this config');
+  });
+
+  it('sends approved drafts through Resend only when live with RESEND_API_KEY and RESEND_FROM', () => {
+    assert.equal(buildRuntime(loadConfig({ ...LIVE_KEYS, MOCK_MODE: 'true' })).sender.name, 'mock');
+    assert.equal(buildRuntime(loadConfig(LIVE_KEYS)).sender.name, 'resend');
+    const noFrom = buildRuntime(loadConfig({ MOCK_MODE: 'false', RESEND_API_KEY: 're_test' }));
+    assert.equal(noFrom.sender.name, 'mock');
+    assert.ok(noFrom.warnings.some(w => w.includes('approvals will use the mock outbox')));
+  });
+
+  it('warns that approvals are disabled in live mode without APPROVAL_TOKEN', () => {
+    assert.ok(buildRuntime(loadConfig({ MOCK_MODE: 'false' })).warnings.some(w => w.startsWith('APPROVAL_TOKEN is not set')));
+    assert.ok(!buildRuntime(loadConfig({ MOCK_MODE: 'false', APPROVAL_TOKEN: 'x'.repeat(16) })).warnings.some(w => w.startsWith('APPROVAL_TOKEN')));
+  });
+
+  it('shares one CRM between the pipeline and the approval step', () => {
+    const runtime = buildRuntime(loadConfig({}));
+    assert.equal(runtime.pipeline.adapters!.crm, runtime.crm);
   });
 
   it('flags CRM keys as not yet used, rather than silently ignoring them', () => {

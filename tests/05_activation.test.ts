@@ -1,7 +1,23 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { generateMockSignals } from '../src/01_signals/index';
-import { activateLead, createLiveResend, createLiveSlack, createMockCRM, createMockEmail, createMockNotifier, toBlockKit } from '../src/05_activation/index';
+import {
+  activateLead,
+  createApprovalService,
+  createLiveResend,
+  createLiveSlack,
+  createMockCRM,
+  createMockEmail,
+  createMockNotifier,
+  createMockSender,
+  createResendSender,
+  draftContentHash,
+  draftIdFor,
+  type DraftRecord,
+  type ProspectSender,
+  reviewEmailText,
+  toBlockKit,
+} from '../src/05_activation/index';
 import { assignVariant } from '../src/06_learning/index';
 import { processLead } from '../src/runPipeline';
 import { ActivationResultSchema, EmailDraftSchema, type Lead } from '../src/shared/types';
@@ -316,5 +332,172 @@ describe('05 activation: live Resend draft delivery (fake fetch, no network)', (
     const hold = makeLead({ qualification: { score: 60, decision: 'hold', evidence: ['Held: x'], missingFields: ['hqCountry'] } });
     await activateLead(hold, { ...freshAdapters(), delivery: resend(fetch), now: () => NOW });
     assert.equal(calls.length, 0);
+  });
+});
+
+describe('05 activation: draft approval before sending', () => {
+  // A passing lead with a verified contact, drafted at NOW.
+  async function drafted(overrides: Partial<Lead> = {}) {
+    const lead = passLead({ contact: verifiedContact(), ...overrides });
+    const result = await activateLead(lead, { ...freshAdapters(), now: () => NOW });
+    return { lead, draft: result.draft! };
+  }
+  function service(options: { crm?: ReturnType<typeof createMockCRM>; now?: () => number } = {}) {
+    const sender = createMockSender();
+    const approvals = createApprovalService({ sender, crm: options.crm ?? createMockCRM(), now: options.now ?? (() => NOW + 60_000) });
+    return { sender, approvals };
+  }
+  const approveInput = (record: DraftRecord, extra: Record<string, unknown> = {}) => ({ approvedBy: 'Abir', contentHash: record.contentHash, acknowledgeReviewNotes: true, ...extra });
+
+  it('registers each draft once, pending approval, with a content hash', async () => {
+    const { lead, draft } = await drafted();
+    const { approvals } = service();
+    const record = approvals.register(lead, draft);
+    assert.equal(record.id, draftIdFor(lead.id));
+    assert.equal(record.status, 'pending_approval');
+    assert.equal(record.contentHash, draftContentHash(draft));
+    assert.equal(approvals.register(lead, draft), record, 'idempotent');
+    assert.deepEqual(approvals.list('pending_approval').map(r => r.id), [record.id]);
+  });
+
+  it('sends an approved draft to the prospect and records the audit trail', async () => {
+    const { lead, draft } = await drafted();
+    const { approvals, sender } = service();
+    const record = approvals.register(lead, draft);
+    const outcome = await approvals.approve(record.id, approveInput(record));
+    assert.ok(outcome.ok);
+    assert.deepEqual(sender.outbox, [{ to: 'lena.hoffmann@test.example', subject: draft.subject, text: draft.body, draftId: record.id }]);
+    assert.equal(record.status, 'sent');
+    assert.deepEqual(record.sent, { provider: 'mock', messageId: 'mock_1', to: 'lena.hoffmann@test.example', at: NOW + 60_000 });
+    assert.deepEqual(record.history.map(h => [h.action, h.by]), [['created', undefined], ['approved', 'Abir'], ['sent', 'Abir']]);
+  });
+
+  it('never sends twice', async () => {
+    const { lead, draft } = await drafted();
+    const { approvals, sender } = service();
+    const record = approvals.register(lead, draft);
+    const [first, second] = await Promise.all([approvals.approve(record.id, approveInput(record)), approvals.approve(record.id, approveInput(record))]);
+    assert.ok(first.ok);
+    assert.deepEqual([second.ok, !second.ok && second.code], [false, 'conflict']);
+    assert.equal(sender.outbox.length, 1);
+  });
+
+  it('requires the exact content hash and a named approver', async () => {
+    const { lead, draft } = await drafted();
+    const { approvals, sender } = service();
+    const record = approvals.register(lead, draft);
+    const wrongHash = await approvals.approve(record.id, approveInput(record, { contentHash: 'a'.repeat(64) }));
+    assert.deepEqual([wrongHash.ok, !wrongHash.ok && wrongHash.code], [false, 'conflict']);
+    const noName = await approvals.approve(record.id, approveInput(record, { approvedBy: '  ' }));
+    assert.deepEqual([noName.ok, !noName.ok && noName.code], [false, 'invalid']);
+    assert.equal(sender.outbox.length, 0);
+    assert.equal(record.status, 'pending_approval');
+  });
+
+  it('requires review notes to be acknowledged', async () => {
+    const { lead, draft } = await drafted();
+    assert.ok(draft.reviewNotes.length > 0, 'fixture draft has review notes');
+    const { approvals, sender } = service();
+    const record = approvals.register(lead, draft);
+    const outcome = await approvals.approve(record.id, approveInput(record, { acknowledgeReviewNotes: undefined }));
+    assert.deepEqual([outcome.ok, !outcome.ok && outcome.code], [false, 'invalid']);
+    assert.equal(sender.outbox.length, 0);
+  });
+
+  it('blocks a draft with no verified recipient', async () => {
+    const { lead, draft } = await drafted({ contact: null });
+    assert.equal(draft.to, null);
+    const { approvals, sender } = service();
+    const record = approvals.register(lead, draft);
+    const outcome = await approvals.approve(record.id, approveInput(record));
+    assert.deepEqual([outcome.ok, !outcome.ok && outcome.code], [false, 'blocked']);
+    assert.equal(record.status, 'blocked');
+    assert.equal(sender.outbox.length, 0);
+  });
+
+  it('blocks when the verification has gone stale by approval time', async () => {
+    const { lead, draft } = await drafted();
+    const { approvals, sender } = service({ now: () => NOW + 8 * DAY_MS });
+    const record = approvals.register(lead, draft);
+    const outcome = await approvals.approve(record.id, approveInput(record));
+    assert.ok(!outcome.ok && outcome.code === 'blocked' && /no longer verified/.test(outcome.message));
+    assert.equal(sender.outbox.length, 0);
+  });
+
+  it('re-checks suppression at send time', async () => {
+    const { lead, draft } = await drafted();
+    const crm = createMockCRM({ existingCustomers: [], openOpportunities: [], suppressedDomains: [], suppressedEmails: ['lena.hoffmann@test.example'] });
+    const { approvals, sender } = service({ crm });
+    const record = approvals.register(lead, draft);
+    const outcome = await approvals.approve(record.id, approveInput(record));
+    assert.ok(!outcome.ok && outcome.code === 'blocked' && /Suppressed at send time/.test(outcome.message));
+    assert.equal(sender.outbox.length, 0);
+  });
+
+  it('does not send when the suppression check itself fails, and allows a retry', async () => {
+    const { lead, draft } = await drafted();
+    const crm = createMockCRM();
+    let calls = 0;
+    const flakyCrm = { ...crm, checkSuppression: async (q: Parameters<typeof crm.checkSuppression>[0]) => (++calls === 1 ? Promise.reject(new Error('CRM down')) : crm.checkSuppression(q)) };
+    const sender = createMockSender();
+    const approvals = createApprovalService({ sender, crm: flakyCrm, now: () => NOW + 60_000 });
+    const record = approvals.register(lead, draft);
+    const first = await approvals.approve(record.id, approveInput(record));
+    assert.ok(!first.ok && first.code === 'send_failed' && /Suppression check failed: CRM down/.test(first.message));
+    assert.equal(record.status, 'pending_approval');
+    assert.equal(sender.outbox.length, 0);
+    assert.ok((await approvals.approve(record.id, approveInput(record))).ok);
+    assert.equal(sender.outbox.length, 1);
+  });
+
+  it('marks a failed send and allows a retry', async () => {
+    const { lead, draft } = await drafted();
+    let attempts = 0;
+    const flaky: ProspectSender = { name: 'flaky', send: async () => (++attempts === 1 ? { status: 'failed', error: 'timeout' } : { status: 'sent', messageId: 'm2' }) };
+    const approvals = createApprovalService({ sender: flaky, crm: createMockCRM(), now: () => NOW + 60_000 });
+    const record = approvals.register(lead, draft);
+    const first = await approvals.approve(record.id, approveInput(record));
+    assert.ok(!first.ok && first.code === 'send_failed');
+    assert.equal(record.status, 'send_failed');
+    const retry = await approvals.approve(record.id, approveInput(record));
+    assert.ok(retry.ok);
+    assert.equal(record.sent!.messageId, 'm2');
+  });
+
+  it('treats a throwing sender as a failed send', async () => {
+    const { lead, draft } = await drafted();
+    const approvals = createApprovalService({ sender: { name: 'boom', send: async () => { throw new Error('ECONNRESET'); } }, crm: createMockCRM(), now: () => NOW });
+    const record = approvals.register(lead, draft);
+    const outcome = await approvals.approve(record.id, approveInput(record));
+    assert.ok(!outcome.ok && outcome.code === 'send_failed' && /ECONNRESET/.test(outcome.message));
+  });
+
+  it('rejects a draft for good', async () => {
+    const { lead, draft } = await drafted();
+    const { approvals, sender } = service();
+    const record = approvals.register(lead, draft);
+    assert.ok(approvals.reject(record.id, { rejectedBy: 'Abir', reason: 'Off-brand opener' }).ok);
+    assert.equal(record.status, 'rejected');
+    const afterwards = await approvals.approve(record.id, approveInput(record));
+    assert.ok(!afterwards.ok && afterwards.code === 'conflict');
+    assert.equal(sender.outbox.length, 0);
+    assert.ok(!approvals.reject(record.id, { rejectedBy: 'x', reason: 'again' }).ok);
+  });
+
+  it('sends approved email to the prospect through Resend', async () => {
+    const { fetch, calls } = fakeFetch({ status: 200, body: '{"id":"email_9"}' });
+    const sender = createResendSender({ apiKey: 're_test', from: 'GTM Lab <hi@lab.example>', fetch });
+    assert.deepEqual(await sender.send({ to: 'lena@test.example', subject: 'Hi', text: 'Body', draftId: 'draft_x' }), { status: 'sent', messageId: 'email_9' });
+    assert.deepEqual(calls[0]!.json, { from: 'GTM Lab <hi@lab.example>', to: ['lena@test.example'], subject: 'Hi', text: 'Body' });
+    const failing = createResendSender({ apiKey: 're_test', from: 'x@lab.example', fetch: fakeFetch({ status: 403, body: 'forbidden' }).fetch });
+    assert.deepEqual(await failing.send({ to: 'a@b.example', subject: 's', text: 't', draftId: 'd' }), { status: 'failed', error: 'Resend returned 403: forbidden' });
+  });
+
+  it('includes the draft id, content hash and approval instructions in the review email', async () => {
+    const { lead, draft } = await drafted();
+    const text = reviewEmailText(draft, lead);
+    assert.ok(text.includes(`Draft id: ${draftIdFor(lead.id)}`));
+    assert.ok(text.includes(`Content hash: ${draftContentHash(draft)}`));
+    assert.ok(text.includes('POST /api/drafts/<draft id>/approve'));
   });
 });

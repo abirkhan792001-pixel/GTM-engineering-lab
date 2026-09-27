@@ -4,11 +4,17 @@ import { enrichLead, enrichmentStatus, totalEnrichmentCostInCents, type EnrichOp
 import { mockScoreRubric, qualifyLead, type QualifyOptions } from './03_qualification/index';
 import { lookupContact, totalContactCostInCents, type LookupOptions } from './04_contacts/index';
 import { activateLead, createMockCRM, createMockEmail, createMockNotifier, type ActivateOptions } from './05_activation/index';
+import { writeExecutiveReport } from './shared/pdfReporter';
 import type { ActivationResult, Lead } from './shared/types';
 
 // End-to-end runner: 01 signals -> 02 enrichment -> 03 qualification -> 04 contacts -> 05 activation.
 // Mock providers and adapters only: no network, no CRM writes, no email sent. The runner
 // scores with the deterministic offline scorer; processLead() uses Claude unless told otherwise.
+//
+//   --export-pdf        also write an executive PDF brief of the run
+//   --out <path>        where to write it (default reports/gtm-brief-procuros.pdf)
+
+export const DEFAULT_REPORT_PATH = 'reports/gtm-brief-procuros.pdf';
 
 export interface PipelineOptions {
   // Fixed stage clocks make the whole run reproducible.
@@ -100,6 +106,14 @@ async function main(): Promise<void> {
   console.log(`  suppressed:              ${count('suppressed')}`);
   console.log(`  drafts pending approval: ${results.filter(r => r.activation.draft).length}`);
   console.log(`  emails sent:             0 (drafts only; sending requires human approval)`);
+
+  if (process.argv.includes('--export-pdf')) {
+    const outFlag = process.argv.indexOf('--out');
+    const outPath = outFlag > -1 && process.argv[outFlag + 1] ? process.argv[outFlag + 1]! : DEFAULT_REPORT_PATH;
+    // No engagement data in this run, so the A/B card shows the experiment as pending.
+    const report = await writeExecutiveReport({ generatedAt: new Date(), dataSource: 'demo', results, experiment: null }, outPath);
+    console.log(`\nPDF brief: ${report.path} (${report.pages} page${report.pages === 1 ? '' : 's'}, ${report.model.prospects.length} qualified prospect${report.model.prospects.length === 1 ? '' : 's'})`);
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

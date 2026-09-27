@@ -1,14 +1,14 @@
 import type { EmailDraft, Lead } from '../../shared/types';
+import { draftContentHash, draftIdFor, type ProspectSender } from '../approvals';
 import type { DraftDelivery } from '../index';
 import type { FetchLike } from './liveSlack';
 
-// Live draft delivery through Resend. Used when MOCK_MODE=false and RESEND_API_KEY,
-// RESEND_FROM and DRAFT_REVIEW_EMAIL are all set (see src/runtime.ts).
+// Resend integrations, used when MOCK_MODE=false (see src/runtime.ts):
 //
-// Safeguard: Resend has no drafts; anything posted to it is sent. So this adapter delivers
-// each DRAFT to the internal review inbox (DRAFT_REVIEW_EMAIL), with the intended recipient
-// shown in the body. It never emails the prospect. Sending to prospects needs an explicit
-// approval step, which is deliberately not part of the automated pipeline.
+// - createLiveResend: delivers each new DRAFT to the internal review inbox
+//   (DRAFT_REVIEW_EMAIL) with the intended recipient shown. Never to the prospect.
+// - createResendSender: sends an email to the prospect. Only the approval service calls it,
+//   after a named reviewer approves the exact draft and the send-time checks pass.
 
 const RESEND_URL = 'https://api.resend.com/emails';
 
@@ -28,6 +28,10 @@ export function reviewEmailText(draft: EmailDraft, lead: Lead): string {
     `Intended recipient: ${draft.to ?? 'none (no verified contact)'}`,
     `Account: ${lead.companyDomain}${q ? ` (ICP ${q.decision}, score ${q.score})` : ''}`,
     `Persona: ${draft.persona} | Experiment: ${draft.experimentId} / ${draft.variantId}`,
+    `Draft id: ${draftIdFor(lead.id)}`,
+    `Content hash: ${draftContentHash(draft)}`,
+    'To send it, approve it via POST /api/drafts/<draft id>/approve with your name, the content hash' +
+      (draft.reviewNotes.length ? ' and acknowledgeReviewNotes: true.' : '.'),
     ...(draft.reviewNotes.length ? ['', 'Review notes:', ...draft.reviewNotes.map(note => `- ${note}`)] : []),
     '',
     `Subject: ${draft.subject}`,
@@ -60,6 +64,35 @@ export function createLiveResend({ apiKey, from, reviewEmail, fetch = globalThis
         // A 2xx without a JSON id still means Resend accepted the email.
       }
       return { status: 'sent', detail: `to review inbox ${reviewEmail}${id ? ` (Resend id ${id})` : ''}` };
+    },
+  };
+}
+
+export interface ResendSenderOptions {
+  apiKey: string;
+  from: string;
+  fetch?: FetchLike;
+  timeoutMs?: number;
+}
+
+export function createResendSender({ apiKey, from, fetch = globalThis.fetch, timeoutMs = 10_000 }: ResendSenderOptions): ProspectSender {
+  return {
+    name: 'resend',
+    async send({ to, subject, text }) {
+      const response = await fetch(RESEND_URL, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ from, to: [to], subject, text }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const body = await response.text();
+      if (!response.ok) return { status: 'failed', error: `Resend returned ${response.status}: ${body.slice(0, 200)}` };
+      try {
+        const id = (JSON.parse(body) as { id?: unknown }).id;
+        return { status: 'sent', messageId: typeof id === 'string' ? id : null };
+      } catch {
+        return { status: 'sent', messageId: null };
+      }
     },
   };
 }
