@@ -6,7 +6,22 @@ import { mockNotifier, type NotifierAdapter } from './adapters/mockNotifier';
 export { createMockCRM, type CrmAdapter } from './adapters/mockCRM';
 export { createMockEmail, type EmailAdapter } from './adapters/mockEmail';
 export { createMockNotifier, type NotifierAdapter } from './adapters/mockNotifier';
-export { createLiveResend, reviewEmailText, type LiveResendOptions } from './adapters/liveResend';
+export { createLiveResend, createResendSender, reviewEmailText, type LiveResendOptions, type ResendSenderOptions } from './adapters/liveResend';
+export { createMockSender } from './adapters/mockSender';
+export {
+  ApproveInputSchema,
+  createApprovalService,
+  draftContentHash,
+  draftIdFor,
+  DraftStatusSchema,
+  RejectInputSchema,
+  type ApprovalOutcome,
+  type ApprovalService,
+  type AuditEntry,
+  type DraftRecord,
+  type DraftStatus,
+  type ProspectSender,
+} from './approvals';
 export { createLiveSlack, toBlockKit, type FetchLike, type LiveSlackOptions } from './adapters/liveSlack';
 
 // Activation routing. Suppression is checked first for every lead, whatever its

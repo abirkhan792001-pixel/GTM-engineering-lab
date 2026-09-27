@@ -12,7 +12,7 @@ default; set `MOCK_MODE=false` to switch on live Claude, Firecrawl, Slack and Re
 | 2. Enrichment | Apollo first (1¢); Firecrawl (5¢) only if data is still missing | Verified company data and cost |
 | 3. Qualification | Dealbreaker rules, then Claude scores against the ICP | Pass, hold or disqualify, with evidence |
 | 4. Contacts | For passing leads only: find the buyer, then find and verify their email | A verified recipient, or the reason there isn't one |
-| 5. Activation | Suppression check, then CRM record, email draft and Slack alert | Drafts addressed to verified contacts; nothing is sent |
+| 5. Activation | Suppression check, then CRM record, email draft and Slack alert; a person approves each draft before it's sent | Drafts sent to verified contacts only after approval |
 | 6. Learning | A/B test the email angle, track replies and meetings | Winning variant |
 
 ## Project structure
@@ -83,7 +83,7 @@ server prints a warning for each fallback.
 | Claude scoring | `ANTHROPIC_API_KEY` | Scores leads that pass the dealbreaker rules |
 | Firecrawl | `FIRECRAWL_API_KEY` | Scrapes the homepage when Apollo can't fill required fields |
 | Slack | `SLACK_WEBHOOK_URL` | Posts Block Kit alerts to the webhook's channel |
-| Resend | `RESEND_API_KEY`, `RESEND_FROM`, `DRAFT_REVIEW_EMAIL` | Emails each draft to your review inbox, never to the prospect |
+| Resend | `RESEND_API_KEY`, `RESEND_FROM` (+ `DRAFT_REVIEW_EMAIL`) | Sends approved drafts to prospects; emails each new draft to your review inbox |
 
 Apollo, contact lookup and the CRM have no live adapters yet, so real domains get no
 recipient and nothing is written to a CRM.
@@ -100,6 +100,30 @@ curl localhost:3000/api/leads/<leadId>   # decision, contact, outcome and log
 `eventType` is one of `contact_form`, `demo_request`, `signup`, `pricing_page_visit` or
 `hiring`. Send `companyDomain`, or an `email` on the company's domain. Set `WEBHOOK_SECRET`
 in live mode; callers then send it in the `x-webhook-secret` header.
+
+## Approving drafts
+
+No email reaches a prospect until a person approves it. Every draft the pipeline produces waits
+in an approval queue. Approving it sends it, after these checks run again at send time:
+
+- you approve the exact content you read (its `contentHash`), under your name
+- drafts with review notes need `acknowledgeReviewNotes: true`
+- the recipient is still verified, within the last 7 days
+- neither the recipient nor the account has been suppressed since the draft was made
+- it hasn't been sent, rejected or blocked already, so it can't go out twice
+
+```sh
+curl localhost:3000/api/drafts?status=pending_approval -H "authorization: Bearer $APPROVAL_TOKEN"
+curl localhost:3000/api/drafts/<draftId> -H "authorization: Bearer $APPROVAL_TOKEN"
+curl -X POST localhost:3000/api/drafts/<draftId>/approve \
+  -H "authorization: Bearer $APPROVAL_TOKEN" -H 'content-type: application/json' \
+  -d '{"approvedBy":"you@company.com","contentHash":"<contentHash>","acknowledgeReviewNotes":true}'
+# or: POST /api/drafts/<draftId>/reject with {"rejectedBy":"…","reason":"…"}
+```
+
+In live mode, sending uses Resend and the approval endpoints need `APPROVAL_TOKEN`; without it
+they're disabled. In mock mode, approved emails land in a mock outbox. The queue is kept in
+memory, so pending drafts are lost when the server restarts.
 
 ## Customize
 

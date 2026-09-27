@@ -45,20 +45,27 @@ jobs:
           npm run pipeline:run
           npm run learn:dev
 
-      # Boot the webhook server in mock mode, post a signal, and wait for the pipeline result.
+      # Boot the webhook server in mock mode, post a signal, wait for the pipeline result,
+      # then approve the draft and check it was sent.
       - name: Webhook server smoke test
         run: |
           PORT=3100 npm run server:dev > server.log 2>&1 &
           for i in $(seq 1 50); do curl -sf localhost:3100/health > /dev/null && break; sleep 0.2; done
           id=$(curl -sf -X POST localhost:3100/api/webhooks/signal -H 'content-type: application/json' \
             -d '{"eventType":"contact_form","source":"ci","email":"lena.hoffmann@northwind-data.example"}' \
-            | node -e "process.stdin.on('data', d => console.log(JSON.parse(d).leadId))")
+            | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).leadId")
           for i in $(seq 1 50); do
-            status=$(curl -sf "localhost:3100/api/leads/$id" | node -e "process.stdin.on('data', d => console.log(JSON.parse(d).status))")
+            status=$(curl -sf "localhost:3100/api/leads/$id" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).status")
             [ "$status" != processing ] && break; sleep 0.2
           done
-          cat server.log
           test "$status" = done
+          draft=$(curl -sf "localhost:3100/api/leads/$id" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).result.draftId")
+          hash=$(curl -sf "localhost:3100/api/drafts/$draft" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).contentHash")
+          sent=$(curl -sf -X POST "localhost:3100/api/drafts/$draft/approve" -H 'content-type: application/json' \
+            -d "{\"approvedBy\":\"ci\",\"contentHash\":\"$hash\",\"acknowledgeReviewNotes\":true}" \
+            | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).status")
+          cat server.log
+          test "$sent" = sent
 
       # With no API key configured, the live runner must skip cleanly.
       - name: Live runner skips without a key
