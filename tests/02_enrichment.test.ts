@@ -7,11 +7,12 @@ import {
   mergedEnrichmentData,
   missingCriticalFields,
   totalEnrichmentCostInCents,
+  createLiveFirecrawl,
   type EnrichmentProvider,
   type ProviderOutput,
 } from '../src/02_enrichment/index';
 import type { Lead } from '../src/shared/types';
-import { CLOCKS, makeLead } from './helpers';
+import { CLOCKS, fakeFirecrawl, makeLead, NOW } from './helpers';
 
 const [northwind, quietpeak, snapsnack] = generateMockSignals().map(s => s.lead) as [Lead, Lead, Lead];
 const now = CLOCKS.enrich;
@@ -114,5 +115,44 @@ describe('02 enrichment: sequencing and failure fallbacks', () => {
     const fallback = provider('scraper', 5, { status: 'enriched', data: { industry: 'Other', headcount: 40, hqCountry: 'DE' } });
     const lead = await enrichLead(blank, { primary, fallback, now });
     assert.deepEqual(mergedEnrichmentData(lead), { industry: 'B2B SaaS', headcount: 40, hqCountry: 'DE' });
+  });
+});
+
+describe('02 enrichment: live Firecrawl adapter (fake client, no network)', () => {
+  const blank = makeLead({ id: 'lead_live', companyDomain: 'acme.example', enrichment: [] });
+  const extraction = { industry: 'B2B SaaS', headcount: 120, hqCountry: 'de', businessModel: 'B2B', techStack: ['HubSpot'] };
+
+  it('scrapes the homepage with a JSON schema and maps the extraction', async () => {
+    const { client, calls } = fakeFirecrawl(extraction);
+    const firecrawl = createLiveFirecrawl({ apiKey: 'fc-test', client });
+    const lead = await enrichLead(blank, { fallback: firecrawl, now: () => NOW });
+    assert.equal(calls[0]!.url, 'https://acme.example/');
+    assert.equal((calls[0]!.options as { formats: { type: string }[] }).formats[0]!.type, 'json');
+    const result = lead.enrichment[1]!;
+    assert.equal(result.source, 'firecrawl');
+    assert.equal(result.status, 'enriched');
+    assert.equal(result.data!.hqCountry, 'DE', 'country normalised to upper case');
+    assert.equal(result.data!.businessModel, 'B2B');
+    assert.deepEqual(missingCriticalFields(lead), []);
+  });
+
+  it('reports missing when the page states none of the facts', async () => {
+    const { client } = fakeFirecrawl({ industry: null, headcount: null, hqCountry: null, businessModel: null, techStack: [] });
+    const lead = await enrichLead(blank, { fallback: createLiveFirecrawl({ apiKey: 'fc-test', client }), now: () => NOW });
+    assert.equal(lead.enrichment[1]!.status, 'missing');
+  });
+
+  it('rejects extractions outside the expected shape as failed', async () => {
+    const { client } = fakeFirecrawl({ industry: 'x'.repeat(500), headcount: 'lots', hqCountry: 'Germany', businessModel: null, techStack: [] });
+    const lead = await enrichLead(blank, { fallback: createLiveFirecrawl({ apiKey: 'fc-test', client }), now: () => NOW });
+    assert.equal(lead.enrichment[1]!.status, 'failed');
+    assert.match(String(lead.enrichment[1]!.data!.error), /outside the expected shape/);
+  });
+
+  it('records an API error as a billed failed step without crashing the waterfall', async () => {
+    const { client } = fakeFirecrawl(() => { throw new Error('402 Payment Required'); });
+    const lead = await enrichLead(blank, { fallback: createLiveFirecrawl({ apiKey: 'fc-test', client }), now: () => NOW });
+    assert.deepEqual(lead.enrichment[1], { status: 'failed', data: { error: '402 Payment Required' }, source: 'firecrawl', costInCents: 5 });
+    assert.equal(enrichmentStatus(lead), 'missing');
   });
 });

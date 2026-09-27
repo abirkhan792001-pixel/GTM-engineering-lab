@@ -16,10 +16,12 @@
     "contacts:dev": "tsx src/04_contacts/run.ts",
     "activate:dev": "tsx src/05_activation/run.ts",
     "pipeline:run": "tsx src/runPipeline.ts",
-    "learn:dev": "tsx src/06_learning/run.ts"
+    "learn:dev": "tsx src/06_learning/run.ts",
+    "server:dev": "tsx src/01_signals/server.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",
+    "@mendable/firecrawl-js": "^4.41.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {

@@ -13,6 +13,12 @@ import type { Contact, EnrichmentResult, Lead, Qualification, Signal } from '../
 process.env.ANTHROPIC_API_KEY = 'test-key-no-network';
 process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:9';
 delete process.env.QUALIFIER_MODEL;
+// Likewise no test may reach Firecrawl, Slack or Resend: live adapters are only ever built
+// with injected fakes, and real credentials from the shell are cleared.
+process.env.MOCK_MODE = 'true';
+for (const key of ['FIRECRAWL_API_KEY', 'SLACK_WEBHOOK_URL', 'RESEND_API_KEY', 'RESEND_FROM', 'DRAFT_REVIEW_EMAIL', 'ATTIO_API_KEY', 'HUBSPOT_API_KEY', 'WEBHOOK_SECRET']) {
+  delete process.env[key];
+}
 
 // Qualification options that score with the deterministic offline scorer.
 export const OFFLINE = { scorer: mockScoreRubric } as const;
@@ -95,4 +101,28 @@ export function idsByVariant(perVariant: number): Record<VariantId, string[]> {
     if (bucket.length < perVariant) bucket.push(id);
   }
   return ids;
+}
+
+// A fake fetch that records requests and answers with a fixed status and body (or throws).
+export function fakeFetch(respond: { status?: number; body?: string } | (() => never) = {}) {
+  const calls: { url: string; init: RequestInit; json: unknown }[] = [];
+  const fetch = async (url: string, init: RequestInit) => {
+    calls.push({ url, init, json: JSON.parse(String(init.body)) });
+    if (typeof respond === 'function') return respond();
+    const status = respond.status ?? 200;
+    return { ok: status >= 200 && status < 300, status, text: async () => respond.body ?? '' };
+  };
+  return { fetch, calls };
+}
+
+// A fake Firecrawl client returning a fixed extraction (or throwing).
+export function fakeFirecrawl(json: unknown | (() => never)) {
+  const calls: { url: string; options: unknown }[] = [];
+  const client = {
+    async scrape(url: string, options: unknown) {
+      calls.push({ url, options });
+      return { json: typeof json === 'function' ? (json as () => never)() : json, metadata: { url } };
+    },
+  };
+  return { client, calls };
 }

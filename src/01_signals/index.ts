@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { LEARNING_COHORT } from '../shared/mockCompanies';
 import { LeadSchema, type Lead } from '../shared/types';
 
+export { IntakeError, INTENT_EVENT_TYPES, IntentSignalSchema, intentToLead, normalizeDomain, type IntentSignal } from './intake';
+
 // Mock signal generator. Emits three synthetic leads that exercise the paths the
 // later stages must handle: a strong fit, an edge case with missing firmographics,
 // and a clear disqualify. Domains use the reserved `.example` TLD; no real companies.

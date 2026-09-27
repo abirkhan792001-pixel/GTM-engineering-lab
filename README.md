@@ -1,8 +1,8 @@
 # GTM-engineering-lab
 
 A code-first go-to-market pipeline in TypeScript: find accounts showing intent, enrich them,
-qualify them with Claude, and hand the good ones to sales. Data providers, CRM, email and
-Slack are mocked; only the Claude scoring step calls a real API.
+qualify them with Claude, and hand the good ones to sales. It runs fully offline on mocks by
+default; set `MOCK_MODE=false` to switch on live Claude, Firecrawl, Slack and Resend.
 
 ## How it works
 
@@ -28,12 +28,14 @@ src/
   context/           ICP, personas, voice rules
   shared/            schemas and config loaders
   runPipeline.ts     run stages 1-5 end to end
+  runtime.ts         pick mock or live integrations from the config
 tests/               one test file per stage, plus a layout check
 docs/                design notes
 ```
 
 Every stage folder has the same shape: `index.ts` is its entry point (other code imports
 only this), `run.ts` is an offline demo, and anything else is internal to the stage.
+`01_signals/server.ts` is the one extra entry point: the webhook server.
 
 ## Quick start
 
@@ -54,8 +56,9 @@ npm run pipeline:run  # full pipeline on 3 mock leads
 | `npm run activate:dev` | What happens for each decision |
 | `npm run learn:dev` | A/B results across 10 leads |
 | `npm run qualify:live` | Real Claude scoring (needs an API key) |
+| `npm run server:dev` | Webhook server on port 3000 (see below) |
 
-Everything except `qualify:live` runs offline on mock data.
+Everything runs offline on mock data unless you set `MOCK_MODE=false` or run `qualify:live`.
 
 ## Claude scoring
 
@@ -69,6 +72,35 @@ cp .env.example .env    # add your ANTHROPIC_API_KEY
 npm run qualify:live    # 2 API calls
 ```
 
+## Live mode and the webhook server
+
+Copy `.env.example` to `.env`, set `MOCK_MODE=false`, and add the keys you have. Each
+integration goes live only when its settings are present; the rest stay on mocks, and the
+server prints a warning for each fallback.
+
+| Integration | Needs | Live behaviour |
+|---|---|---|
+| Claude scoring | `ANTHROPIC_API_KEY` | Scores leads that pass the dealbreaker rules |
+| Firecrawl | `FIRECRAWL_API_KEY` | Scrapes the homepage when Apollo can't fill required fields |
+| Slack | `SLACK_WEBHOOK_URL` | Posts Block Kit alerts to the webhook's channel |
+| Resend | `RESEND_API_KEY`, `RESEND_FROM`, `DRAFT_REVIEW_EMAIL` | Emails each draft to your review inbox, never to the prospect |
+
+Apollo, contact lookup and the CRM have no live adapters yet, so real domains get no
+recipient and nothing is written to a CRM.
+
+```sh
+npm run server:dev
+curl -X POST localhost:3000/api/webhooks/signal \
+  -H 'content-type: application/json' \
+  -d '{"eventType":"contact_form","source":"website","email":"lena.hoffmann@northwind-data.example"}'
+# 202 {"status":"accepted","leadId":"lead_northwind-data_…","statusUrl":"/api/leads/…"}
+curl localhost:3000/api/leads/<leadId>   # decision, contact, outcome and log
+```
+
+`eventType` is one of `contact_form`, `demo_request`, `signup`, `pricing_page_visit` or
+`hiring`. Send `companyDomain`, or an `email` on the company's domain. Set `WEBHOOK_SECRET`
+in live mode; callers then send it in the `x-webhook-secret` header.
+
 ## Customize
 
 Edit the files in `src/context/` to fit your market:
@@ -79,7 +111,8 @@ Edit the files in `src/context/` to fit your market:
 
 ## CI
 
-- **CI** runs typecheck, tests and the offline demos on every push and pull request.
+- **CI** runs typecheck, tests, the offline demos and a webhook-server smoke test on every
+  push and pull request.
 - **Live qualification** runs `qualify:live` on demand. It needs an `ANTHROPIC_API_KEY`
   repository secret and spends a few API credits.
 

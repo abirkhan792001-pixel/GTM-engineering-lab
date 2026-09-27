@@ -10,6 +10,7 @@ import { mockFirecrawl } from './providers/mockFirecrawl';
 import type { EnrichmentProvider } from './providers/types';
 
 export type { EnrichmentProvider, ProviderInput, ProviderOutput } from './providers/types';
+export { createLiveFirecrawl, ExtractedCompanySchema, type FirecrawlScraper, type LiveFirecrawlOptions } from './providers/liveFirecrawl';
 import { ICP } from '../shared/icp';
 
 // Waterfall enrichment: always run the cheap database lookup first, and only pay

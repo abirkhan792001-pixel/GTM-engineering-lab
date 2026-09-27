@@ -52,7 +52,7 @@ export function createMockNotifier(): NotifierAdapter & { outbox: SlackAlert[] }
   return {
     outbox,
     async sendAlert(lead, channel, context) {
-      const alert = SlackAlertSchema.parse({ channel, text: formatAlert(lead, channel, context), sentAt: context.sentAt });
+      const alert = SlackAlertSchema.parse({ channel, text: formatAlert(lead, channel, context), sentAt: context.sentAt, delivery: 'mock' });
       outbox.push(alert);
       return alert;
     },
