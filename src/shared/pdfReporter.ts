@@ -3,8 +3,9 @@ import { dirname } from 'node:path';
 import PDFDocument from 'pdfkit';
 import type { ActivationResult, Lead } from './types';
 
-// Executive PDF brief of a pipeline run: headline metrics, an outcome table, and a profile
-// per qualified prospect (score, evidence, buyer, outreach draft).
+// Executive PDF brief of a pipeline run: headline metrics, an outcome table, a profile per
+// qualified prospect (score, evidence, buyer, outreach draft), and a shorter profile per lead
+// held for manual review (score, why it was held, evidence).
 //
 // buildReportModel() is pure and holds every number and label that appears in the PDF, so
 // tests check content without parsing PDFs. writeExecutiveReport() only does layout.
@@ -29,8 +30,9 @@ export interface ReportInput {
   dataSource: 'demo' | 'live';
   results: ReportLeadResult[];
   experiment: ExperimentSummary | null;
-  // Detailed profiles shown (highest scores first) to keep the brief to 1-2 pages. Every
-  // lead still appears in the outcome table. Default 2.
+  // Detailed profiles shown to keep the brief to 1-2 pages: qualified prospects first
+  // (highest scores first), then held leads in any slots left. Every lead still appears in
+  // the outcome table. Default 2.
   maxProfiles?: number;
 }
 
@@ -38,11 +40,18 @@ export interface ProspectProfile {
   companyName: string;
   domain: string;
   score: number;
-  status: 'Pass';
+  status: 'Pass' | 'Hold';
   scoredBy: string;
   evidence: string[];
   buyer: { name: string; title: string; email: string | null; emailStatus: string } | null;
   draft: { to: string | null; subject: string; body: string; variantId: string; reviewNotes: string[] } | null;
+}
+
+export interface HeldProfile extends Omit<ProspectProfile, 'status' | 'buyer' | 'draft'> {
+  status: 'Hold';
+  // The qualifier's "Held: ..." line, e.g. the score band or the missing fields.
+  reason: string;
+  missingFields: string[];
 }
 
 export interface ReportModel {
@@ -61,6 +70,9 @@ export interface ReportModel {
   prospects: ProspectProfile[];
   // Qualified prospects not profiled because of maxProfiles.
   omittedProspects: number;
+  held: HeldProfile[];
+  // Held leads not profiled because of maxHeldProfiles.
+  omittedHeld: number;
 }
 
 export const REPORT_TITLE = 'GTM Pipeline Execution Brief';
@@ -79,12 +91,30 @@ const VARIANT_LABELS: Record<string, string> = {
   variant_b_social_proof: 'B: social proof',
 };
 
+// Scorer label and reasoning lines shared by pass and hold profiles. Bookkeeping lines (the
+// scorer, the rubric total, the pass/hold verdict) are shown elsewhere or not at all.
+function scoring(lead: Lead) {
+  const q = lead.qualification!;
+  const scoredByClaude = q.evidence[0]?.startsWith('Scored by ') ?? false;
+  return {
+    companyName: companyName(lead),
+    domain: lead.companyDomain,
+    score: q.score,
+    scoredBy: scoredByClaude ? q.evidence[0]!.replace(/^Scored by /, 'Claude (').replace(/ against rubric .*$/, ')') : 'Offline rubric scorer',
+    evidence: q.evidence.filter(line => !/^(Scored by |Rubric score:|Passed:|Held:)/.test(line)),
+  };
+}
+
 export function buildReportModel(input: ReportInput): ReportModel {
   const { results } = input;
-  const passing = results
-    .filter(r => r.lead.qualification?.decision === 'pass')
-    .sort((a, b) => b.lead.qualification!.score - a.lead.qualification!.score);
+  const byDecision = (decision: 'pass' | 'hold') =>
+    results
+      .filter(r => r.lead.qualification?.decision === decision)
+      .sort((a, b) => b.lead.qualification!.score - a.lead.qualification!.score);
+  const passing = byDecision('pass');
+  const holding = byDecision('hold');
   const maxProfiles = input.maxProfiles ?? 2;
+  const maxHeldProfiles = Math.max(0, maxProfiles - passing.length);
   const sum = (values: number[]) => values.reduce((a, b) => a + b, 0);
 
   const exp = input.experiment;
@@ -114,22 +144,26 @@ export function buildReportModel(input: ReportInput): ReportModel {
     })),
     omittedProspects: Math.max(0, passing.length - maxProfiles),
     prospects: passing.slice(0, maxProfiles).map(({ lead, activation }) => {
-      const q = lead.qualification!;
-      const scoredByClaude = q.evidence[0]?.startsWith('Scored by ') ?? false;
       const c = lead.contact;
       const d = activation.draft;
       return {
-        companyName: companyName(lead),
-        domain: lead.companyDomain,
-        score: q.score,
+        ...scoring(lead),
         status: 'Pass' as const,
-        scoredBy: scoredByClaude ? q.evidence[0]!.replace(/^Scored by /, 'Claude (').replace(/ against rubric .*$/, ')') : 'Offline rubric scorer',
-        // The reasoning lines; the scorer label and bookkeeping totals are shown elsewhere.
-        evidence: q.evidence.filter(line => !/^(Scored by |Rubric score:|Passed:)/.test(line)),
         buyer: c?.person
           ? { name: c.person.fullName, title: c.person.title, email: c.email, emailStatus: c.status === 'verified' ? 'verified' : `not verified (${c.emailStatus ?? 'no email'})` }
           : null,
         draft: d ? { to: d.to, subject: d.subject, body: d.body, variantId: d.variantId, reviewNotes: d.reviewNotes } : null,
+      };
+    }),
+    omittedHeld: Math.max(0, holding.length - maxHeldProfiles),
+    held: holding.slice(0, maxHeldProfiles).map(({ lead }) => {
+      const q = lead.qualification!;
+      const reason = q.evidence.find(line => line.startsWith('Held: '))?.replace(/^Held: /, '') ?? 'held for manual review';
+      return {
+        ...scoring(lead),
+        status: 'Hold' as const,
+        reason: reason.charAt(0).toUpperCase() + reason.slice(1),
+        missingFields: q.missingFields,
       };
     }),
   };
@@ -168,6 +202,8 @@ const COLOR = {
   previewFill: '#f7f7f5',
   passText: '#006300',
   passFill: '#e3f2e3',
+  holdText: '#7a4b00',
+  holdFill: '#fff1cc',
   bannerFill: '#fff4d6',
 };
 const PAGE_MARGIN = 48;
@@ -282,20 +318,22 @@ export async function writeExecutiveReport(input: ReportInput, outPath: string, 
       .text(text(`Showing the ${model.prospects.length} highest-scoring. The other ${model.omittedProspects} are in the outcome table above.`), left, doc.y, { width });
   }
 
-  for (const p of model.prospects) {
-    // Keep the company header, evidence and buyer together; the draft box moves as a unit.
+  // Company header, score, status badge and cited evidence, leaving doc.y below the evidence.
+  // `reserve` is the height of what the caller draws next, kept on the same page.
+  const profileHeader = (p: ProspectProfile | HeldProfile, reserve: number) => {
     doc.font('Helvetica').fontSize(9);
     const evidenceH = p.evidence.reduce((h, line) => h + doc.heightOfString(text(line), { width: width - 14 }) + 2, 0);
-    ensureSpace(60 + evidenceH + 40);
+    ensureSpace(60 + evidenceH + reserve);
 
     const top = doc.y + 4;
     doc.font('Helvetica-Bold').fontSize(14).fillColor(COLOR.ink).text(text(p.companyName), left, top, { width: width - 150 });
     doc.font('Helvetica').fontSize(9.5).fillColor(COLOR.inkSecondary).text(text(p.domain), left, doc.y, { width: width - 150 });
     // Score and status, right-aligned. Status always carries its label, never color alone.
+    const badge = p.status === 'Pass' ? { label: 'PASS', fill: COLOR.passFill, ink: COLOR.passText } : { label: 'HOLD', fill: COLOR.holdFill, ink: COLOR.holdText };
     doc.font('Helvetica-Bold').fontSize(16).fillColor(COLOR.ink).text(`${p.score}/100`, left + width - 140, top, { width: 80, align: 'right' });
     doc.font('Helvetica').fontSize(7.5).fillColor(COLOR.inkSecondary).text('ICP score', left + width - 140, top + 19, { width: 80, align: 'right' });
-    doc.roundedRect(left + width - 50, top + 2, 50, 18, 9).fill(COLOR.passFill);
-    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(COLOR.passText).text('PASS', left + width - 50, top + 7, { width: 50, align: 'center' });
+    doc.roundedRect(left + width - 50, top + 2, 50, 18, 9).fill(badge.fill);
+    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(badge.ink).text(badge.label, left + width - 50, top + 7, { width: 50, align: 'center' });
     doc.y = Math.max(doc.y, top + 34) + 6;
 
     doc.font('Helvetica-Bold').fontSize(9).fillColor(COLOR.inkSecondary).text(text(`Reasoning and evidence  |  ${p.scoredBy}`), left, doc.y, { width });
@@ -307,6 +345,11 @@ export async function writeExecutiveReport(input: ReportInput, outPath: string, 
       doc.fillColor(COLOR.ink).text(text(line), left + 12, y, { width: width - 14 });
       doc.y += 2;
     }
+  };
+
+  for (const p of model.prospects) {
+    // Keep the company header, evidence and buyer together; the draft box moves as a unit.
+    profileHeader(p, 40);
 
     doc.moveDown(0.8).font('Helvetica-Bold').fontSize(9).fillColor(COLOR.inkSecondary).text('Buyer', left, doc.y, { width });
     doc.font('Helvetica').fontSize(9.5).fillColor(COLOR.ink);
@@ -341,6 +384,25 @@ export async function writeExecutiveReport(input: ReportInput, outPath: string, 
       doc.font('Helvetica').fontSize(9.5).fillColor(COLOR.ink).text(text(p.draft.body), left + pad, bodyY, { width: innerW, lineGap: 1.5 });
       doc.font('Helvetica').fontSize(7.5).fillColor(COLOR.inkMuted).text(text(status), left + pad, bodyY + bodyH + 10, { width: innerW });
       doc.y = y + boxH + 14;
+    }
+  }
+
+  // Held for manual review: why each lead is held, and what it is waiting on.
+  if (model.held.length) {
+    const heldTotal = model.held.length + model.omittedHeld;
+    sectionTitle(model.omittedHeld ? `Held for manual review (${model.held.length} of ${heldTotal})` : `Held for manual review (${heldTotal})`);
+    doc.font('Helvetica').fontSize(8.5).fillColor(COLOR.inkMuted)
+      .text('Close to the ICP but not a pass. No contact lookup, CRM record or draft until a reviewer clears the lead or better data raises the score.', left, doc.y, { width });
+    if (model.omittedHeld) {
+      doc.text(text(`Showing the ${model.held.length} highest-scoring. The other ${model.omittedHeld} are in the outcome table above.`), left, doc.y, { width });
+    }
+    doc.moveDown(0.4);
+    for (const h of model.held) {
+      profileHeader(h, 44);
+      doc.moveDown(0.6).font('Helvetica-Bold').fontSize(9).fillColor(COLOR.inkSecondary).text('Why held', left, doc.y, { width });
+      doc.font('Helvetica').fontSize(9.5).fillColor(COLOR.ink).text(text(h.reason), left, doc.y, { width });
+      if (h.missingFields.length) doc.fillColor(COLOR.inkSecondary).text(text(`Missing data: ${h.missingFields.join(', ')}`), left, doc.y, { width });
+      doc.y += 14;
     }
   }
 
