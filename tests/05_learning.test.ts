@@ -4,7 +4,7 @@ import { generateMockCohort } from '../src/01_signals/index';
 import { assignVariant, FIRST_TOUCH_EXPERIMENT, renderTemplate, VARIANT_IDS } from '../src/05_learning/experiments';
 import { createEventStore, type EngagementEventType } from '../src/05_learning/tracker';
 import { processLead } from '../src/runPipeline';
-import { CLOCKS, freshAdapters, idsByVariant } from './helpers';
+import { CLOCKS, freshAdapters, idsByVariant, OFFLINE } from './helpers';
 
 const TS = '2026-09-27T10:00:00.000Z';
 const event = (leadId: string, eventType: EngagementEventType, timestamp = TS) => ({
@@ -45,7 +45,7 @@ describe('05 learning: deterministic variant assignment', () => {
   it('stamps the assigned variant on every cohort draft, with a proof-review note on B only', async () => {
     const adapters = freshAdapters();
     for (const lead of generateMockCohort()) {
-      const draft = (await processLead(lead, { clocks: CLOCKS, adapters })).activation.draft!;
+      const draft = (await processLead(lead, { clocks: CLOCKS, adapters, qualify: OFFLINE })).activation.draft!;
       assert.equal(draft.variantId, assignVariant(lead.id).id);
       assert.equal(draft.reviewNotes.some(n => n.startsWith('Variant B')), draft.variantId === 'variant_b_social_proof');
       assert.ok(draft.checks.every(c => c.passed), `${lead.companyDomain}: ${JSON.stringify(draft.checks)}`);

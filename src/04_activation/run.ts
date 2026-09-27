@@ -1,5 +1,6 @@
 import { generateMockSignals, MOCK_AS_OF_MS } from '../01_signals/index';
 import { enrichLead } from '../02_enrichment/index';
+import { mockScoreRubric } from '../03_qualification/evaluator';
 import { qualifyLead } from '../03_qualification/index';
 import type { Lead } from '../shared/types';
 import { createMockCRM } from './adapters/mockCRM';
@@ -41,7 +42,7 @@ async function main(): Promise<void> {
   const qualified: { label: string; lead: Lead }[] = [];
   for (const { scenario, lead } of generateMockSignals()) {
     const enriched = await enrichLead(lead, { now: at(60_000) });
-    qualified.push({ label: scenario, lead: await qualifyLead(enriched, { now: at(120_000) }) });
+    qualified.push({ label: scenario, lead: await qualifyLead(enriched, { now: at(120_000), scorer: mockScoreRubric }) });
   }
   qualified.push({ label: 'existing-customer fixture', lead: existingCustomerFixture });
 

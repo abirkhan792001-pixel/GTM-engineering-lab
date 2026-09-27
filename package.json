@@ -14,9 +14,11 @@
     "activate:dev": "tsx src/04_activation/run.ts",
     "pipeline:run": "tsx src/runPipeline.ts",
     "learn:dev": "tsx src/05_learning/run.ts",
-    "test": "tsx --test 'tests/**/*.test.ts'"
+    "test": "tsx --test 'tests/**/*.test.ts'",
+    "qualify:live": "tsx src/03_qualification/runLive.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {

@@ -9,7 +9,7 @@ import { assignVariant } from '../src/05_learning/experiments';
 import { processLead } from '../src/runPipeline';
 import { ActivationResultSchema, EmailDraftSchema, type Lead } from '../src/shared/types';
 import { parseVoiceGuidelines, VOICE, VOICE_MARKDOWN } from '../src/shared/voice';
-import { CLOCKS, freshAdapters, makeLead, NOW, passQualification, signal } from './helpers';
+import { CLOCKS, freshAdapters, makeLead, NOW, OFFLINE, passQualification, signal } from './helpers';
 
 const passLead = (overrides: Partial<Lead> = {}) => makeLead({ qualification: passQualification(), ...overrides });
 const activate = (lead: Lead, adapters = freshAdapters()) => activateLead(lead, { ...adapters, now: () => NOW });
@@ -86,7 +86,7 @@ describe('04 activation: routing by decision', () => {
   it('routes the three mock leads end to end', async () => {
     const adapters = freshAdapters();
     const outcomes = [];
-    for (const { lead } of generateMockSignals()) outcomes.push((await processLead(lead, { clocks: CLOCKS, adapters })).activation.outcome);
+    for (const { lead } of generateMockSignals()) outcomes.push((await processLead(lead, { clocks: CLOCKS, adapters, qualify: OFFLINE })).activation.outcome);
     assert.deepEqual(outcomes, ['activated', 'manual_review', 'disqualified']);
   });
 });

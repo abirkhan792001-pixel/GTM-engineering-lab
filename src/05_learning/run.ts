@@ -1,5 +1,6 @@
 import { generateMockCohort, MOCK_AS_OF_MS } from '../01_signals/index';
 import { totalEnrichmentCostInCents } from '../02_enrichment/index';
+import { mockScoreRubric } from '../03_qualification/evaluator';
 import { createMockCRM } from '../04_activation/adapters/mockCRM';
 import { createMockEmail } from '../04_activation/adapters/mockEmail';
 import { createMockNotifier } from '../04_activation/adapters/mockNotifier';
@@ -45,7 +46,7 @@ async function main(): Promise<void> {
 
   // 1. Full pipeline for every lead.
   const results: PipelineResult[] = [];
-  for (const lead of leads) results.push(await processLead(lead, { clocks, adapters }));
+  for (const lead of leads) results.push(await processLead(lead, { clocks, adapters, qualify: { scorer: mockScoreRubric } }));
   const drafted = results.filter(r => r.activation.draft);
   const spend = results.reduce((sum, r) => sum + totalEnrichmentCostInCents(r.lead), 0);
   const outcomes = results.map(r => r.activation.outcome).reduce<Record<string, number>>((acc, o) => ({ ...acc, [o]: (acc[o] ?? 0) + 1 }), {});

@@ -1,2 +1,5 @@
 reference-gtm-template/
 node_modules/
+.env
+.env.*
+!.env.example

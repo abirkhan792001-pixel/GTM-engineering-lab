@@ -1,7 +1,8 @@
 import { pathToFileURL } from 'node:url';
 import { generateMockSignals, MOCK_AS_OF_MS } from './01_signals/index';
 import { enrichLead, enrichmentStatus, totalEnrichmentCostInCents } from './02_enrichment/index';
-import { qualifyLead } from './03_qualification/index';
+import { mockScoreRubric } from './03_qualification/evaluator';
+import { qualifyLead, type QualifyOptions } from './03_qualification/index';
 import { activateLead, type ActivateOptions } from './04_activation/index';
 import { createMockCRM } from './04_activation/adapters/mockCRM';
 import { createMockEmail } from './04_activation/adapters/mockEmail';
@@ -9,12 +10,15 @@ import { createMockNotifier } from './04_activation/adapters/mockNotifier';
 import type { ActivationResult, Lead } from './shared/types';
 
 // End-to-end runner: 01 signals -> 02 enrichment -> 03 qualification -> 04 activation.
-// Mock providers and adapters only: no network, no CRM writes, no email sent.
+// Mock providers and adapters only: no network, no CRM writes, no email sent. The runner
+// scores with the deterministic offline scorer; processLead() uses Claude unless told otherwise.
 
 export interface PipelineOptions {
   // Fixed stage clocks make the whole run reproducible.
   clocks?: { enrich: () => number; qualify: () => number; activate: () => number };
   adapters?: Omit<ActivateOptions, 'now'>;
+  // Qualification options, e.g. { scorer: mockScoreRubric } to stay offline, or a Claude client.
+  qualify?: Omit<QualifyOptions, 'now'>;
 }
 
 export interface PipelineResult {
@@ -25,7 +29,7 @@ export interface PipelineResult {
 export async function processLead(signalLead: Lead, options: PipelineOptions = {}): Promise<PipelineResult> {
   const clocks = options.clocks ?? { enrich: Date.now, qualify: Date.now, activate: Date.now };
   const enriched = await enrichLead(signalLead, { now: clocks.enrich });
-  const qualified = await qualifyLead(enriched, { now: clocks.qualify });
+  const qualified = await qualifyLead(enriched, { ...options.qualify, now: clocks.qualify });
   const activation = await activateLead(qualified, { ...options.adapters, now: clocks.activate });
   return { lead: qualified, activation };
 }
@@ -43,6 +47,7 @@ async function main(): Promise<void> {
     },
     // Fresh adapter instances so each run starts with an empty CRM and outbox.
     adapters: { crm: createMockCRM(), email: createMockEmail(), notifier: createMockNotifier() },
+    qualify: { scorer: mockScoreRubric },
   };
 
   console.log(`GTM pipeline: ${leads.length} raw signal leads -> enrichment -> qualification -> activation\n`);

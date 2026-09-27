@@ -1,4 +1,5 @@
 import { MOCK_AS_OF_MS } from '../src/01_signals/index';
+import { mockScoreRubric } from '../src/03_qualification/evaluator';
 import { createMockCRM } from '../src/04_activation/adapters/mockCRM';
 import { createMockEmail } from '../src/04_activation/adapters/mockEmail';
 import { createMockNotifier } from '../src/04_activation/adapters/mockNotifier';
@@ -6,6 +7,17 @@ import { assignVariant, type VariantId } from '../src/05_learning/experiments';
 import type { EnrichmentResult, Lead, Qualification, Signal } from '../src/shared/types';
 
 // Shared fixtures for the test suite. Everything is synthetic and deterministic.
+
+// No test may reach the real Anthropic API. Any Claude client created by default code
+// gets a dummy key and an unroutable base URL, so a test that forgets to inject a fake
+// client or the offline scorer fails loudly instead of spending credits. The SDK reads
+// both variables when a client is constructed, which only happens lazily inside a test.
+process.env.ANTHROPIC_API_KEY = 'test-key-no-network';
+process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:9';
+delete process.env.QUALIFIER_MODEL;
+
+// Qualification options that score with the deterministic offline scorer.
+export const OFFLINE = { scorer: mockScoreRubric } as const;
 
 export const NOW = MOCK_AS_OF_MS;
 export const DAY_MS = 86_400_000;

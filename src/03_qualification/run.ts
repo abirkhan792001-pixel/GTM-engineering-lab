@@ -1,10 +1,12 @@
 import { generateMockSignals, MOCK_AS_OF_MS } from '../01_signals/index';
 import { enrichLead } from '../02_enrichment/index';
+import { mockScoreRubric } from './evaluator';
 import { qualifyLead } from './index';
 import { checkHardGates } from './rules';
 
 // Dev runner: 01 mock signals -> 02 enrichment waterfall -> 03 qualification.
-// Mock providers and mock scorer only; no network.
+// Mock providers and the deterministic offline scorer only; no network.
+// For the real Claude evaluator, run `npm run qualify:live`.
 
 async function main(): Promise<void> {
   const leads = generateMockSignals();
@@ -17,7 +19,7 @@ async function main(): Promise<void> {
   for (const { scenario, lead } of leads) {
     const enriched = await enrichLead(lead, { now: enrichedAt });
     const stage = checkHardGates(enriched) ? 'hard gates (rules.ts)' : 'ICP evaluator (evaluator.ts)';
-    const qualified = await qualifyLead(enriched, { now: qualifiedAt });
+    const qualified = await qualifyLead(enriched, { now: qualifiedAt, scorer: mockScoreRubric });
     const q = qualified.qualification;
     if (!q) throw new Error(`${qualified.companyDomain} has no qualification`);
 
