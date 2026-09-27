@@ -1,0 +1,26 @@
+{
+  "version": "icp-v1",
+  "description": "Template ICP. Replace with your real targeting before running live batches.",
+  "companySize": {
+    "minEmployees": 20,
+    "maxEmployees": 500
+  },
+  "targetIndustries": [
+    "B2B SaaS",
+    "Developer Tools",
+    "Fintech Infrastructure",
+    "Data & Analytics"
+  ],
+  "targetCountries": ["US", "GB", "DE", "CH", "AT", "NL"],
+  "dealbreakers": [
+    "Consumer-only (B2C) business model",
+    "Agency or consultancy reselling services",
+    "Fewer than 10 employees",
+    "Existing customer or open opportunity in CRM",
+    "Sanctioned country or on the suppression list"
+  ],
+  "qualification": {
+    "passThreshold": 70,
+    "notes": "Missing evidence earns zero points and must be listed in missingFields. A dealbreaker disqualifies regardless of score. Intent signals (e.g. hiring) are not company fit."
+  }
+}
