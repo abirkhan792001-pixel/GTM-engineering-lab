@@ -1,12 +1,8 @@
 import { pathToFileURL } from 'node:url';
 import { generateMockSignals, MOCK_AS_OF_MS } from './01_signals/index';
 import { enrichLead, enrichmentStatus, totalEnrichmentCostInCents } from './02_enrichment/index';
-import { mockScoreRubric } from './03_qualification/evaluator';
-import { qualifyLead, type QualifyOptions } from './03_qualification/index';
-import { activateLead, type ActivateOptions } from './04_activation/index';
-import { createMockCRM } from './04_activation/adapters/mockCRM';
-import { createMockEmail } from './04_activation/adapters/mockEmail';
-import { createMockNotifier } from './04_activation/adapters/mockNotifier';
+import { mockScoreRubric, qualifyLead, type QualifyOptions } from './03_qualification/index';
+import { activateLead, createMockCRM, createMockEmail, createMockNotifier, type ActivateOptions } from './04_activation/index';
 import type { ActivationResult, Lead } from './shared/types';
 
 // End-to-end runner: 01 signals -> 02 enrichment -> 03 qualification -> 04 activation.

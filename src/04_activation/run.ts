@@ -1,7 +1,6 @@
 import { generateMockSignals, MOCK_AS_OF_MS } from '../01_signals/index';
 import { enrichLead } from '../02_enrichment/index';
-import { mockScoreRubric } from '../03_qualification/evaluator';
-import { qualifyLead } from '../03_qualification/index';
+import { mockScoreRubric, qualifyLead } from '../03_qualification/index';
 import type { Lead } from '../shared/types';
 import { createMockCRM } from './adapters/mockCRM';
 import { createMockEmail } from './adapters/mockEmail';

@@ -1,5 +1,5 @@
 import { mergedEnrichmentData } from '../../02_enrichment/index';
-import { assignVariant, FIRST_TOUCH_EXPERIMENT, renderTemplate, type Experiment } from '../../05_learning/experiments';
+import { assignVariant, FIRST_TOUCH_EXPERIMENT, renderTemplate, type Experiment } from '../../05_learning/index';
 import { PERSONAS, selectPersona, type Persona } from '../../shared/personas';
 import { EmailDraftSchema, type EmailDraft, type Lead, type Signal } from '../../shared/types';
 import { VOICE, type VoiceGuidelines } from '../../shared/voice';

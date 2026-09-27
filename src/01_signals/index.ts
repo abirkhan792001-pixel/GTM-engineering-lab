@@ -1,4 +1,3 @@
-import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { LEARNING_COHORT } from '../shared/mockCompanies';
 import { LeadSchema, type Lead } from '../shared/types';
@@ -138,18 +137,4 @@ export function generateMockCohort(asOfMs: number = MOCK_AS_OF_MS): Lead[] {
     if (!parsed.success) throw new Error(`Cohort lead ${company.domain} failed LeadSchema:\n${z.prettifyError(parsed.error)}`);
     return parsed.data;
   });
-}
-
-function main(): void {
-  const leads = generateMockSignals();
-  console.log(`[01_signals] emitted ${leads.length} leads (as_of ${new Date(MOCK_AS_OF_MS).toISOString()})\n`);
-  for (const { scenario, lead } of leads) {
-    console.log(`--- ${scenario}: ${lead.companyDomain} (${lead.signals.length} signal${lead.signals.length === 1 ? '' : 's'}) ---`);
-    console.log(JSON.stringify(lead, null, 2));
-    console.log();
-  }
-}
-
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main();
 }

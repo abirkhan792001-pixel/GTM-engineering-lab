@@ -37,7 +37,7 @@ jobs:
       # non-zero on schema violations or failed self-checks, so they double as smoke tests.
       - name: Smoke-run pipeline stages
         run: |
-          npm run signals
+          npm run signals:dev
           npm run enrich:dev
           npm run qualify:dev
           npm run activate:dev

@@ -26,9 +26,12 @@ src/
   context/           ICP, personas, voice rules
   shared/            schemas and config loaders
   runPipeline.ts     run stages 1-4 end to end
-tests/               one test file per stage
+tests/               one test file per stage, plus a layout check
 docs/                design notes
 ```
+
+Every stage folder has the same shape: `index.ts` is its entry point (other code imports
+only this), `run.ts` is an offline demo, and anything else is internal to the stage.
 
 ## Quick start
 
@@ -42,7 +45,7 @@ npm run pipeline:run  # full pipeline on 3 mock leads
 
 | Command | Shows |
 |---|---|
-| `npm run signals` | The 3 mock leads |
+| `npm run signals:dev` | The 3 mock leads |
 | `npm run enrich:dev` | Enrichment path and cost per lead |
 | `npm run qualify:dev` | Decision, score and evidence |
 | `npm run activate:dev` | What happens for each decision |

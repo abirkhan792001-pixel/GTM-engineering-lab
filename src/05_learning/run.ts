@@ -1,9 +1,7 @@
 import { generateMockCohort, MOCK_AS_OF_MS } from '../01_signals/index';
 import { totalEnrichmentCostInCents } from '../02_enrichment/index';
-import { mockScoreRubric } from '../03_qualification/evaluator';
-import { createMockCRM } from '../04_activation/adapters/mockCRM';
-import { createMockEmail } from '../04_activation/adapters/mockEmail';
-import { createMockNotifier } from '../04_activation/adapters/mockNotifier';
+import { mockScoreRubric } from '../03_qualification/index';
+import { createMockCRM, createMockEmail, createMockNotifier } from '../04_activation/index';
 import { processLead, type PipelineResult } from '../runPipeline';
 import { FIRST_TOUCH_EXPERIMENT, VARIANT_IDS, type VariantId } from './experiments';
 import { createEventStore, type EngagementEventType, type VariantMetrics } from './tracker';
