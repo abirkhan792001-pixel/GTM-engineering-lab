@@ -1,6 +1,6 @@
 import { pathToFileURL } from 'node:url';
 import { generateMockSignals, MOCK_AS_OF_MS } from './01_signals/index';
-import { enrichLead, enrichmentStatus, totalEnrichmentCostInCents } from './02_enrichment/index';
+import { enrichLead, enrichmentStatus, totalEnrichmentCostInCents, type EnrichOptions } from './02_enrichment/index';
 import { mockScoreRubric, qualifyLead, type QualifyOptions } from './03_qualification/index';
 import { lookupContact, totalContactCostInCents, type LookupOptions } from './04_contacts/index';
 import { activateLead, createMockCRM, createMockEmail, createMockNotifier, type ActivateOptions } from './05_activation/index';
@@ -13,6 +13,8 @@ import type { ActivationResult, Lead } from './shared/types';
 export interface PipelineOptions {
   // Fixed stage clocks make the whole run reproducible.
   clocks?: { enrich: () => number; qualify: () => number; contacts: () => number; activate: () => number };
+  // Enrichment options, e.g. a live Firecrawl provider as the fallback.
+  enrich?: Omit<EnrichOptions, 'now'>;
   adapters?: Omit<ActivateOptions, 'now'>;
   // Qualification options, e.g. { scorer: mockScoreRubric } to stay offline, or a Claude client.
   qualify?: Omit<QualifyOptions, 'now'>;
@@ -27,7 +29,7 @@ export interface PipelineResult {
 
 export async function processLead(signalLead: Lead, options: PipelineOptions = {}): Promise<PipelineResult> {
   const clocks = options.clocks ?? { enrich: Date.now, qualify: Date.now, contacts: Date.now, activate: Date.now };
-  const enriched = await enrichLead(signalLead, { now: clocks.enrich });
+  const enriched = await enrichLead(signalLead, { ...options.enrich, now: clocks.enrich });
   const qualified = await qualifyLead(enriched, { ...options.qualify, now: clocks.qualify });
   const withContact = await lookupContact(qualified, { ...options.contacts, now: clocks.contacts });
   const activation = await activateLead(withContact, { ...options.adapters, now: clocks.activate });

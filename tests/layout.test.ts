@@ -5,10 +5,13 @@ import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 // Every stage folder (src/NN_name) has the same layout: index.ts is its public entry
-// point and run.ts its offline demo. Code outside a stage imports only its index.ts.
+// point and run.ts its offline demo. Code outside a stage imports only its index.ts,
+// plus server.ts where a stage exposes an HTTP entry point (01_signals' webhook server,
+// which can't be re-exported from index.ts without an import cycle through the pipeline).
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'src');
+const PUBLIC_MODULES = ['index', 'server'];
 const STAGES = readdirSync(SRC).filter(name => /^\d\d_/.test(name) && statSync(join(SRC, name)).isDirectory());
 
 function tsFiles(dir: string): string[] {
@@ -30,13 +33,13 @@ describe('project layout', () => {
     });
   }
 
-  it('imports other stages only through their index.ts', () => {
+  it('imports other stages only through their public modules', () => {
     const violations: string[] = [];
     for (const file of [...tsFiles(SRC), ...tsFiles(join(ROOT, 'tests'))]) {
       for (const [, spec] of readFileSync(file, 'utf8').matchAll(/from '(\.[^']+)'/g)) {
         const target = relative(SRC, resolve(dirname(file), spec!)).split('\\').join('/');
         const match = target.match(/^(\d\d_[^/]+)\/(.+)$/);
-        if (!match || match[2] === 'index') continue;
+        if (!match || PUBLIC_MODULES.includes(match[2]!)) continue;
         if (!resolve(file).startsWith(join(SRC, match[1]!) + '/')) {
           violations.push(`${relative(ROOT, file)} imports ${spec}`);
         }

@@ -45,6 +45,21 @@ jobs:
           npm run pipeline:run
           npm run learn:dev
 
+      # Boot the webhook server in mock mode, post a signal, and wait for the pipeline result.
+      - name: Webhook server smoke test
+        run: |
+          PORT=3100 npm run server:dev > server.log 2>&1 &
+          for i in $(seq 1 50); do curl -sf localhost:3100/health > /dev/null && break; sleep 0.2; done
+          id=$(curl -sf -X POST localhost:3100/api/webhooks/signal -H 'content-type: application/json' \
+            -d '{"eventType":"contact_form","source":"ci","email":"lena.hoffmann@northwind-data.example"}' \
+            | node -e "process.stdin.on('data', d => console.log(JSON.parse(d).leadId))")
+          for i in $(seq 1 50); do
+            status=$(curl -sf "localhost:3100/api/leads/$id" | node -e "process.stdin.on('data', d => console.log(JSON.parse(d).status))")
+            [ "$status" != processing ] && break; sleep 0.2
+          done
+          cat server.log
+          test "$status" = done
+
       # With no API key configured, the live runner must skip cleanly.
       - name: Live runner skips without a key
         env:

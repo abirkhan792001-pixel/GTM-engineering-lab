@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { generateMockSignals } from '../src/01_signals/index';
-import { activateLead, createMockCRM, createMockEmail, createMockNotifier } from '../src/05_activation/index';
+import { activateLead, createLiveResend, createLiveSlack, createMockCRM, createMockEmail, createMockNotifier, toBlockKit } from '../src/05_activation/index';
 import { assignVariant } from '../src/06_learning/index';
 import { processLead } from '../src/runPipeline';
 import { ActivationResultSchema, EmailDraftSchema, type Lead } from '../src/shared/types';
 import { parseVoiceGuidelines, VOICE, VOICE_MARKDOWN } from '../src/shared/voice';
-import { CLOCKS, DAY_MS, freshAdapters, makeLead, NOW, OFFLINE, passQualification, signal, verifiedContact } from './helpers';
+import { CLOCKS, DAY_MS, fakeFetch, freshAdapters, makeLead, NOW, OFFLINE, passQualification, signal, verifiedContact } from './helpers';
 
 const passLead = (overrides: Partial<Lead> = {}) => makeLead({ qualification: passQualification(), ...overrides });
 const activate = (lead: Lead, adapters = freshAdapters()) => activateLead(lead, { ...adapters, now: () => NOW });
@@ -242,5 +242,79 @@ describe('05 activation: recipients from 04_contacts', () => {
     assert.equal(result.draft!.to, null);
     assert.ok(result.draft!.reviewNotes.some(n => n.includes('catch_all')));
     assert.ok(result.alerts[0]!.text.includes('*Contact:* no sendable recipient (found Chris Dunn, Head of Revenue Operations; email catch_all)'));
+  });
+});
+
+describe('05 activation: live Slack adapter (fake fetch, no network)', () => {
+  const WEBHOOK = 'https://hooks.slack.example/services/T/B/X';
+
+  it('posts Block Kit to the webhook and marks the alert sent', async () => {
+    const { fetch, calls } = fakeFetch({ status: 200, body: 'ok' });
+    const result = await activateLead(passLead({ contact: verifiedContact() }), { ...freshAdapters(), notifier: createLiveSlack({ webhookUrl: WEBHOOK, fetch }), now: () => NOW });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.url, WEBHOOK);
+    const payload = calls[0]!.json as { text: string; blocks: { type: string }[] };
+    assert.deepEqual(payload.blocks.map(b => b.type), ['header', 'section', 'context']);
+    assert.match(payload.text, /Hot lead: test\.example/);
+    assert.equal(result.alerts[0]!.delivery, 'sent');
+    assert.equal(result.outcome, 'activated');
+  });
+
+  it('escapes Slack control characters so scraped text cannot ping or link', () => {
+    const payload = toBlockKit(':fire: *Hot lead:* x.example\n• <!channel> & <https://evil.example|click>', '#hot-leads');
+    const section = JSON.stringify(payload.blocks[1]);
+    assert.ok(!section.includes('<!channel>') && section.includes('&lt;!channel&gt;') && section.includes('&amp;'));
+  });
+
+  for (const [name, respond] of [
+    ['a non-2xx response', { status: 404, body: 'no_service' }],
+    ['a network error', () => { throw new Error('ECONNRESET'); }],
+  ] as const) {
+    it(`marks the alert failed on ${name} without failing activation`, async () => {
+      const { fetch } = fakeFetch(respond as Parameters<typeof fakeFetch>[0]);
+      const result = await activateLead(passLead(), { ...freshAdapters(), notifier: createLiveSlack({ webhookUrl: WEBHOOK, fetch }), now: () => NOW });
+      assert.equal(result.outcome, 'activated');
+      assert.equal(result.alerts[0]!.delivery, 'failed');
+    });
+  }
+});
+
+describe('05 activation: live Resend draft delivery (fake fetch, no network)', () => {
+  const resend = (fetch: ReturnType<typeof fakeFetch>['fetch']) =>
+    createLiveResend({ apiKey: 're_test', from: 'GTM Lab <drafts@lab.example>', reviewEmail: 'review@lab.example', fetch });
+
+  it('delivers the draft to the review inbox, never to the prospect', async () => {
+    const { fetch, calls } = fakeFetch({ status: 200, body: '{"id":"email_123"}' });
+    const result = await activateLead(passLead({ contact: verifiedContact() }), { ...freshAdapters(), delivery: resend(fetch), now: () => NOW });
+    const sent = calls[0]!.json as { to: string[]; from: string; subject: string; text: string };
+    assert.equal(calls[0]!.url, 'https://api.resend.com/emails');
+    assert.deepEqual(sent.to, ['review@lab.example']);
+    assert.ok(!JSON.stringify(sent.to).includes('lena.hoffmann'), 'prospect is not a recipient');
+    assert.match(sent.subject, /^\[Draft for approval\] /);
+    assert.ok(sent.text.startsWith('DRAFT FOR APPROVAL. This email has NOT been sent to the prospect.'));
+    assert.ok(sent.text.includes('Intended recipient: lena.hoffmann@test.example'));
+    assert.equal((calls[0]!.init.headers as Record<string, string>).authorization, 'Bearer re_test');
+    assert.ok(result.log.some(l => l === 'Review: draft delivered via resend: to review inbox review@lab.example (Resend id email_123)'));
+  });
+
+  it('logs a failed delivery and keeps the activation intact', async () => {
+    const { fetch } = fakeFetch({ status: 422, body: '{"message":"domain not verified"}' });
+    const result = await activateLead(passLead(), { ...freshAdapters(), delivery: resend(fetch), now: () => NOW });
+    assert.equal(result.outcome, 'activated');
+    assert.ok(result.log.some(l => l.startsWith('Review: draft NOT delivered via resend: Resend returned 422')));
+  });
+
+  it('survives a network error during delivery', async () => {
+    const { fetch } = fakeFetch(() => { throw new Error('ETIMEDOUT'); });
+    const result = await activateLead(passLead(), { ...freshAdapters(), delivery: resend(fetch), now: () => NOW });
+    assert.equal(result.outcome, 'activated');
+    assert.ok(result.log.some(l => l.startsWith('Review: draft NOT delivered via resend: Error: ETIMEDOUT')));
+  });
+
+  it('only delivers drafts: holds and disqualified leads trigger no email', async () => {
+    const { fetch, calls } = fakeFetch();
+    const hold = makeLead({ qualification: { score: 60, decision: 'hold', evidence: ['Held: x'], missingFields: ['hqCountry'] } });
+    await activateLead(hold, { ...freshAdapters(), delivery: resend(fetch), now: () => NOW });
+    assert.equal(calls.length, 0);
   });
 });

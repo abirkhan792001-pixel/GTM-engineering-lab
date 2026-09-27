@@ -1,0 +1,80 @@
+import { createLiveFirecrawl, type FirecrawlScraper } from './02_enrichment/index';
+import { mockScoreRubric } from './03_qualification/index';
+import { createLiveResend, createLiveSlack, createMockCRM, createMockEmail, createMockNotifier, type FetchLike } from './05_activation/index';
+import type { PipelineOptions } from './runPipeline';
+import type { Config } from './shared/config';
+
+// Chooses mock or live integrations from the config. MOCK_MODE=true keeps everything
+// offline. MOCK_MODE=false upgrades each integration whose credentials are present and
+// keeps the mock (with a warning) for the rest, so a partial setup still runs end to end.
+
+export interface Runtime {
+  mode: 'mock' | 'live';
+  pipeline: Omit<PipelineOptions, 'clocks'>;
+  // What each stage will actually use, for startup logs and health checks.
+  integrations: Record<'enrichment' | 'qualification' | 'contacts' | 'crm' | 'slack' | 'draftReview', string>;
+  warnings: string[];
+}
+
+export interface RuntimeDeps {
+  firecrawlClient?: FirecrawlScraper;
+  fetch?: FetchLike;
+}
+
+export function buildRuntime(config: Config, deps: RuntimeDeps = {}): Runtime {
+  const warnings: string[] = [];
+  const pipeline: Omit<PipelineOptions, 'clocks'> = {
+    qualify: { scorer: mockScoreRubric },
+    adapters: { crm: createMockCRM(), email: createMockEmail(), notifier: createMockNotifier() },
+  };
+  const integrations: Runtime['integrations'] = {
+    enrichment: 'mock (apollo, firecrawl)',
+    qualification: 'offline scorer',
+    contacts: 'mock (people search, email finder)',
+    crm: 'mock',
+    slack: 'mock',
+    draftReview: 'off',
+  };
+
+  if (config.MOCK_MODE) {
+    const liveKeys = (['ANTHROPIC_API_KEY', 'FIRECRAWL_API_KEY', 'SLACK_WEBHOOK_URL', 'RESEND_API_KEY', 'ATTIO_API_KEY', 'HUBSPOT_API_KEY'] as const).filter(k => config[k]);
+    if (liveKeys.length) warnings.push(`MOCK_MODE=true: ignoring configured credentials (${liveKeys.join(', ')}). Set MOCK_MODE=false to use them.`);
+    return { mode: 'mock', pipeline, integrations, warnings };
+  }
+
+  if (config.FIRECRAWL_API_KEY) {
+    pipeline.enrich = { fallback: createLiveFirecrawl({ apiKey: config.FIRECRAWL_API_KEY, client: deps.firecrawlClient }) };
+    integrations.enrichment = 'apollo (mock) -> firecrawl (live)';
+  } else {
+    warnings.push('FIRECRAWL_API_KEY is not set: enrichment stays on the mock providers.');
+  }
+
+  if (config.ANTHROPIC_API_KEY) {
+    pipeline.qualify = {};
+    integrations.qualification = 'claude (live)';
+  } else {
+    warnings.push('ANTHROPIC_API_KEY is not set: qualification uses the offline scorer.');
+  }
+
+  if (config.SLACK_WEBHOOK_URL) {
+    pipeline.adapters!.notifier = createLiveSlack({ webhookUrl: config.SLACK_WEBHOOK_URL, fetch: deps.fetch });
+    integrations.slack = 'live (incoming webhook)';
+  } else {
+    warnings.push('SLACK_WEBHOOK_URL is not set: Slack alerts stay in the mock outbox.');
+  }
+
+  const resendMissing = (['RESEND_API_KEY', 'RESEND_FROM', 'DRAFT_REVIEW_EMAIL'] as const).filter(k => !config[k]);
+  if (resendMissing.length === 0) {
+    pipeline.adapters!.delivery = createLiveResend({ apiKey: config.RESEND_API_KEY!, from: config.RESEND_FROM!, reviewEmail: config.DRAFT_REVIEW_EMAIL!, fetch: deps.fetch });
+    integrations.draftReview = `live (resend, to ${config.DRAFT_REVIEW_EMAIL})`;
+  } else {
+    warnings.push(`${resendMissing.join(', ')} not set: drafts are not delivered for review.`);
+  }
+
+  if (config.ATTIO_API_KEY || config.HUBSPOT_API_KEY) {
+    warnings.push('A CRM key is set, but the CRM adapter is still a mock: nothing is written to your CRM yet.');
+  }
+  warnings.push('Contact lookup has no live provider yet: real domains will get no recipient.');
+
+  return { mode: 'live', pipeline, integrations, warnings };
+}

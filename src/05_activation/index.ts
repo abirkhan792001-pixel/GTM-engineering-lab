@@ -1,4 +1,4 @@
-import { ActivationResultSchema, type ActivationResult, type Lead } from '../shared/types';
+import { ActivationResultSchema, type ActivationResult, type EmailDraft, type Lead } from '../shared/types';
 import { mockCRM, type CrmAdapter } from './adapters/mockCRM';
 import { mockEmail, type EmailAdapter } from './adapters/mockEmail';
 import { mockNotifier, type NotifierAdapter } from './adapters/mockNotifier';
@@ -6,20 +6,31 @@ import { mockNotifier, type NotifierAdapter } from './adapters/mockNotifier';
 export { createMockCRM, type CrmAdapter } from './adapters/mockCRM';
 export { createMockEmail, type EmailAdapter } from './adapters/mockEmail';
 export { createMockNotifier, type NotifierAdapter } from './adapters/mockNotifier';
+export { createLiveResend, reviewEmailText, type LiveResendOptions } from './adapters/liveResend';
+export { createLiveSlack, toBlockKit, type FetchLike, type LiveSlackOptions } from './adapters/liveSlack';
 
 // Activation routing. Suppression is checked first for every lead, whatever its
 // decision; a suppressed lead gets no CRM write, draft or alert. Nothing here sends
 // email: a 'pass' ends at a DRAFT that needs human approval.
 
+// Delivers a finished DRAFT somewhere a human can review it (e.g. a review inbox).
+// Never to the prospect: sending to a prospect needs an explicit approval step.
+export interface DraftDelivery {
+  name: string;
+  deliver(draft: EmailDraft, lead: Lead): Promise<{ status: 'sent' | 'failed'; detail: string }>;
+}
+
 export interface ActivateOptions {
   crm?: CrmAdapter;
   email?: EmailAdapter;
   notifier?: NotifierAdapter;
+  // Optional: when set (live mode), each draft is also delivered for human review.
+  delivery?: DraftDelivery;
   now?: () => number;
 }
 
 export async function activateLead(lead: Lead, options: ActivateOptions = {}): Promise<ActivationResult> {
-  const { crm = mockCRM, email = mockEmail, notifier = mockNotifier, now = Date.now } = options;
+  const { crm = mockCRM, email = mockEmail, notifier = mockNotifier, delivery, now = Date.now } = options;
   const q = lead.qualification;
   if (!q) throw new Error(`Lead ${lead.id} has no qualification; run 03_qualification before activation`);
 
@@ -42,6 +53,10 @@ export async function activateLead(lead: Lead, options: ActivateOptions = {}): P
       log.push(`CRM: ${crmSync.action} company ${crmSync.companyRecordId}, ${crmSync.contactRecordId ? `contact ${crmSync.contactRecordId}, ` : ''}deal ${crmSync.dealId}`);
       const draft = await email.generateDraft(lead, { asOfMs: activatedAt });
       log.push(`Email: DRAFT "${draft.subject}" to ${draft.to ?? 'no sendable recipient'} (persona '${draft.persona}'), awaiting approval`);
+      if (delivery) {
+        const delivered = await delivery.deliver(draft, lead).catch(error => ({ status: 'failed' as const, detail: String(error) }));
+        log.push(`Review: draft ${delivered.status === 'sent' ? 'delivered' : 'NOT delivered'} via ${delivery.name}: ${delivered.detail}`);
+      }
       const alert = await notifier.sendAlert(lead, '#hot-leads', { sentAt: activatedAt, crm: crmSync, draft });
       log.push(`Slack: alert posted to ${alert.channel}`);
       return ActivationResultSchema.parse({

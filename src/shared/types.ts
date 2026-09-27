@@ -164,6 +164,8 @@ export const SlackAlertSchema = z.strictObject({
   channel: SlackChannelSchema,
   text: NonEmptyString,
   sentAt: EpochMs,
+  // 'mock' when no real Slack call was made; live alerts report whether the post succeeded.
+  delivery: z.enum(['mock', 'sent', 'failed']),
 });
 export type SlackAlert = z.infer<typeof SlackAlertSchema>;
 
