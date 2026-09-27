@@ -100,6 +100,9 @@ export const EmailDraftSchema = z.strictObject({
   // Null until a verified contact email is resolved; a draft without one cannot be approved.
   to: z.email().nullable(),
   persona: NonEmptyString,
+  // A/B assignment stamped by 05_learning; carried through to engagement events.
+  experimentId: NonEmptyString,
+  variantId: NonEmptyString,
   subject: NonEmptyString,
   body: NonEmptyString,
   evidenceUsed: z.array(NonEmptyString),

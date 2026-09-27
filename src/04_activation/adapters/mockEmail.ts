@@ -1,4 +1,5 @@
 import { mergedEnrichmentData } from '../../02_enrichment/index';
+import { assignVariant, FIRST_TOUCH_EXPERIMENT, renderTemplate, type Experiment } from '../../05_learning/experiments';
 import { PERSONAS, selectPersona, type Persona } from '../../shared/personas';
 import { EmailDraftSchema, type EmailDraft, type Lead, type Signal } from '../../shared/types';
 import { VOICE, type VoiceGuidelines } from '../../shared/voice';
@@ -10,6 +11,9 @@ import { VOICE, type VoiceGuidelines } from '../../shared/voice';
 // Copy rules come from src/context/voice.md: the draft uses one observation taken
 // from the signal that qualification scored, and is linted against the parsed
 // limits and banned words. Failed checks become review notes; they are never hidden.
+//
+// A/B test: the subject line and the relevance sentence come from the variant that
+// 05_learning assigns to the lead; experimentId and variantId are stamped on the draft.
 
 export interface EmailAdapter {
   generateDraft(lead: Lead): Promise<EmailDraft>;
@@ -22,6 +26,7 @@ export interface EmailOptions {
   // The approved offer, stated plainly. No claims beyond this sentence go in the copy.
   offer?: string;
   cta?: string;
+  experiment?: Experiment;
 }
 
 const DEFAULT_OFFER = 'We build lead qualification pipelines where every score cites its evidence.';
@@ -83,6 +88,7 @@ export function createMockEmail(options: EmailOptions = {}): EmailAdapter {
   const senderName = options.senderName ?? 'The GTM Engineering Lab team';
   const offer = options.offer ?? DEFAULT_OFFER;
   const cta = options.cta ?? DEFAULT_CTA;
+  const experiment = options.experiment ?? FIRST_TOUCH_EXPERIMENT;
 
   return {
     async generateDraft(lead) {
@@ -94,6 +100,7 @@ export function createMockEmail(options: EmailOptions = {}): EmailAdapter {
       const persona = selectPersona(headcount, personas);
       const company = companyName(lead);
       const scored = scoredSignal(lead);
+      const variant = assignVariant(lead.id, experiment);
       const reviewNotes: string[] = [];
       const evidenceUsed: string[] = [];
 
@@ -101,22 +108,30 @@ export function createMockEmail(options: EmailOptions = {}): EmailAdapter {
       //    Website visits are never mentioned to the prospect.
       const jobTitle = scored?.signal.rawData.signalType === 'hiring' ? safeText(scored.signal.rawData.jobTitle) : null;
       let observation: string;
-      let subject: string;
       if (scored && jobTitle) {
         observation = `I saw ${company} is hiring a ${jobTitle}.`;
-        subject = `your ${jobTitle.toLowerCase()} hire`;
         evidenceUsed.push(scored.evidenceLine);
       } else {
         const industry = safeText(data.industry);
         observation = industry ? `I work with ${industry} teams on lead qualification.` : 'I work with B2B teams on lead qualification.';
-        subject = `lead qualification at ${company.toLowerCase()}`;
         reviewNotes.push('No quotable public observation; used a role-relevant opener instead of personalising.');
       }
 
-      // 2. Why it matters to the persona, framed as a common pattern, not a claim about them.
+      // Subject from the assigned variant; fall back to a neutral subject if a template field is unknown.
+      const renderedSubject = renderTemplate(variant.subjectLineTemplate, { jobTitle: jobTitle?.toLowerCase(), company: company.toLowerCase() });
+      let subject = renderedSubject.text;
+      if (renderedSubject.missing.length) {
+        subject = `lead qualification at ${company.toLowerCase()}`;
+        reviewNotes.push(`Variant subject needed ${renderedSubject.missing.join(', ')}; used the neutral fallback subject.`);
+      }
+
+      // 2. The variant's angle: why it matters to the persona (pain) or what similar teams got (proof).
       const painPoint = persona.painPoints[0]!;
-      const relevance = `Often that means ${lowerFirst(painPoint)}.`;
-      evidenceUsed.push(`Persona '${persona.id}' pain point: ${painPoint}`);
+      const relevance = renderTemplate(variant.bodyLineTemplate, { painPoint: lowerFirst(painPoint) }).text;
+      evidenceUsed.push(
+        variant.bodyLineTemplate.includes('{{painPoint}}') ? `Persona '${persona.id}' pain point: ${painPoint}` : `${variant.id} angle: ${variant.angle}`,
+      );
+      if (variant.reviewNote) reviewNotes.push(variant.reviewNote);
 
       // 3. Offer, 4. one ask, sign-off.
       const body = ['Hi,', observation, `${relevance}`, offer, cta, `Best,\n${senderName}`].join('\n\n');
@@ -130,6 +145,8 @@ export function createMockEmail(options: EmailOptions = {}): EmailAdapter {
         requiresApproval: true,
         to: null,
         persona: persona.id,
+        experimentId: experiment.id,
+        variantId: variant.id,
         subject,
         body,
         evidenceUsed,

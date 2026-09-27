@@ -31,7 +31,9 @@ export function formatAlert(lead: Lead, channel: SlackChannel, context: AlertCon
   }
   lines.push('*Why:*', ...keyEvidence(lead).map(line => `• ${line}`));
   if (context.crm) lines.push(`*CRM:* ${context.crm.url} (${context.crm.action})`);
-  if (context.draft) lines.push(`*Draft:* "${context.draft.subject}" awaiting approval (${context.draft.reviewNotes.length} review note(s))`);
+  if (context.draft) {
+    lines.push(`*Draft:* "${context.draft.subject}" (${context.draft.variantId}) awaiting approval (${context.draft.reviewNotes.length} review note(s))`);
+  }
   if (channel === '#manual-review') lines.push('*Next step:* fill the missing fields or confirm fit, then re-run qualification.');
   return lines.join('\n');
 }

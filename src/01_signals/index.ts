@@ -1,5 +1,6 @@
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
+import { LEARNING_COHORT } from '../shared/mockCompanies';
 import { LeadSchema, type Lead } from '../shared/types';
 
 // Mock signal generator. Emits three synthetic leads that exercise the paths the
@@ -110,6 +111,32 @@ export function generateMockSignals(asOfMs: number = MOCK_AS_OF_MS): { scenario:
       throw new Error(`Mock lead for scenario '${scenario}' failed LeadSchema:\n${z.prettifyError(parsed.error)}`);
     }
     return { scenario, lead: parsed.data };
+  });
+}
+
+// Ten synthetic ICP-fit accounts, each with one fresh hiring signal. Used by the
+// 05_learning A/B runner so a full batch reaches activation and gets drafted.
+export function generateMockCohort(asOfMs: number = MOCK_AS_OF_MS): Lead[] {
+  return LEARNING_COHORT.map(company => {
+    const slug = company.domain.split('.')[0]!;
+    const parsed = LeadSchema.safeParse({
+      id: `lead_${slug}`,
+      companyDomain: company.domain,
+      signals: [
+        {
+          id: `sig_${slug}_hiring_001`,
+          source: 'job-board',
+          timestamp: asOfMs - company.signalAgeDays * DAY_MS,
+          rawData: { signalType: 'hiring', companyName: company.name, jobTitle: company.hiringFor },
+        },
+      ],
+      enrichment: [],
+      qualification: null,
+      createdAt: asOfMs,
+      updatedAt: asOfMs,
+    });
+    if (!parsed.success) throw new Error(`Cohort lead ${company.domain} failed LeadSchema:\n${z.prettifyError(parsed.error)}`);
+    return parsed.data;
   });
 }
 

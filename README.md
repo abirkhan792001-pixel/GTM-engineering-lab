@@ -9,7 +9,7 @@ src/
   02_enrichment/     waterfall enrichment: Apollo first, Firecrawl only if ICP-required fields are missing (mock providers)
   03_qualification/  hard-gate dealbreakers (rules.ts), then rubric scoring (evaluator.ts; mock now, Claude + Zod next)
   04_activation/     suppression check, then routing: pass -> CRM + email DRAFT + #hot-leads; hold -> #manual-review; disqualify -> inactive (mock CRM/Resend/Slack adapters)
-  05_learning/       campaign performance and A/B test analysis
+  05_learning/       deterministic A/B assignment (experiments.ts), engagement tracking and variant metrics (tracker.ts)
   context/           ICP (icp.json), buyer personas (personas.json), voice/copy rules (voice.md)
   shared/types.ts    Zod contracts: Signal, EnrichmentResult, Qualification, Lead
   shared/            validated loaders for icp.json, personas.json and the rules in voice.md
@@ -29,4 +29,5 @@ npm run enrich:dev  # run the mock leads through the enrichment waterfall, with 
 npm run qualify:dev # signals -> enrichment -> qualification: decision, score, evidence, missing fields
 npm run activate:dev   # activation routing for each decision, plus a suppressed existing customer
 npm run pipeline:run   # full 01 -> 04 run with a per-lead report; nothing is ever sent
+npm run learn:dev      # 10-lead cohort through 01 -> 04, simulated engagement, A vs B performance table
 ```

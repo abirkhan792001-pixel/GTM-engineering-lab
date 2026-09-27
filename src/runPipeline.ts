@@ -63,7 +63,7 @@ async function main(): Promise<void> {
     for (const line of activation.log) console.log(`      - ${line}`);
     if (activation.draft) {
       const d = activation.draft;
-      console.log(`  email ${d.status} (approval required, to: ${d.to ?? 'unresolved'}):`);
+      console.log(`  email ${d.status} (approval required, to: ${d.to ?? 'unresolved'}, ${d.experimentId}/${d.variantId}):`);
       console.log(`      subject: ${d.subject}`);
       console.log(indent(d.body, '      | '));
       console.log(`      checks: ${d.checks.map(c => `${c.name} ${c.passed ? 'ok' : 'FAIL'}`).join(', ')}`);
