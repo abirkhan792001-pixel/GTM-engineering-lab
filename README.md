@@ -132,10 +132,11 @@ memory, so pending drafts are lost when the server restarts.
 `npm run report:pdf` runs the pipeline and writes `reports/gtm-brief-procuros.pdf`: headline
 metrics (leads processed, pass rate, enrichment cost, winning A/B variant), an outcome table for
 every lead, and profiles of the top qualified prospects with their score, evidence, verified
-buyer and outreach draft. Pass `--out <path>` to write elsewhere.
+buyer and outreach draft. Leads held for manual review get a shorter profile: score, why they
+were held, any missing data and the evidence. Pass `--out <path>` to write elsewhere.
 
-The brief stays at 1-2 pages by profiling the two highest scorers; everyone else is in the
-outcome table. Runs on mock data carry a demo banner, and the A/B card only names a winner once
+The brief stays at 1-2 pages by profiling two leads: the highest-scoring qualified prospects
+first, then held leads if a slot is free. Everyone else is in the outcome table. Runs on mock data carry a demo banner, and the A/B card only names a winner once
 there is engagement data behind it. The layout code is in `src/shared/pdfReporter.ts`.
 
 ## Customize

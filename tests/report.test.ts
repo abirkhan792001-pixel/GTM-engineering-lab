@@ -60,6 +60,16 @@ describe('report: model built from a pipeline run', () => {
     assert.ok(p!.draft!.body.startsWith('Hi Lena,'));
   });
 
+  it('profiles the held lead with its reason, missing data and evidence', async () => {
+    const model = buildReportModel({ generatedAt: GENERATED_AT, dataSource: 'demo', results: await run(), experiment: null });
+    assert.equal(model.held.length, 1);
+    const h = model.held[0]!;
+    assert.deepEqual([h.domain, h.score, h.status, h.scoredBy], ['quietpeak.example', 67, 'Hold', 'Offline rubric scorer']);
+    assert.equal(h.reason, 'Cannot pass with missing required fields (hqCountry)');
+    assert.deepEqual(h.missingFields, ['hqCountry']);
+    assert.ok(h.evidence.length > 0 && !h.evidence.some(e => /^(Rubric score|Held:)/.test(e)), 'bookkeeping lines dropped');
+  });
+
   it('labels Claude-scored evidence with the model and hides the scorer line', async () => {
     const [northwind, ...rest] = await run();
     const q = northwind!.lead.qualification!;
@@ -87,6 +97,7 @@ describe('report: model built from a pipeline run', () => {
     assert.equal(model.omittedProspects, 9);
     assert.ok(model.prospects[0]!.score >= model.prospects[1]!.score);
     assert.ok(model.prospects.every(p => p.score >= 99));
+    assert.deepEqual([model.held.length, model.omittedHeld], [0, 1], 'held leads only get profile slots qualified prospects leave free');
   });
 
   it('handles a run with no leads', () => {
@@ -104,16 +115,16 @@ describe('report: text safety for built-in PDF fonts', () => {
 });
 
 describe('report: PDF output', () => {
-  it('writes a one-page A4 PDF with the brief content', async () => {
+  it('writes a two-page A4 PDF with the brief content', async () => {
     const path = join(tmp(), 'brief.pdf');
     const report = await writeExecutiveReport({ generatedAt: GENERATED_AT, dataSource: 'demo', results: await run(), experiment: null }, path, { compress: false });
     const raw = readFileSync(path, 'latin1');
     assert.ok(raw.startsWith('%PDF-'));
     assert.ok(raw.trimEnd().endsWith('%%EOF'));
-    assert.equal(report.pages, 1);
+    assert.equal(report.pages, 2);
     assert.match(raw, /\/MediaBox \[0 0 595\.28 841\.89\]/, 'A4');
     const text = pdfText(path);
-    for (const expected of [REPORT_TITLE, 'Generated 27 Sept 2026, 09:00 UTC', 'Demo data.', 'Leads processed', '33.3%', '$0.08', 'Pending', 'Northwind Data', '98/100', 'PASS', 'Lena Hoffmann, Director of Sales Operations', 'Hi Lena,', 'Status: DRAFT, awaiting approval', 'Page 1 of 1']) {
+    for (const expected of [REPORT_TITLE, 'Generated 27 Sept 2026, 09:00 UTC', 'Demo data.', 'Leads processed', '33.3%', '$0.08', 'Pending', 'Northwind Data', '98/100', 'PASS', 'Lena Hoffmann, Director of Sales Operations', 'Hi Lena,', 'Status: DRAFT, awaiting approval', 'Held for manual review (1)', 'Quietpeak', '67/100', 'HOLD', 'Why held', 'Missing data: hqCountry', 'Page 2 of 2']) {
       assert.ok(text.includes(expected), `PDF text should include "${expected}"`);
     }
   });
@@ -134,6 +145,16 @@ describe('report: PDF output', () => {
     const text = pdfText(path);
     assert.ok(!text.includes('Demo data.'));
     assert.ok(text.includes('No leads passed qualification in this run.'));
+  });
+
+  it('still shows the evidence when the only lead is held', async () => {
+    const path = join(tmp(), 'brief.pdf');
+    const report = await writeExecutiveReport({ generatedAt: GENERATED_AT, dataSource: 'live', results: await run([generateMockSignals()[1]!.lead]), experiment: null }, path, { compress: false });
+    assert.equal(report.pages, 1);
+    const text = pdfText(path);
+    for (const expected of ['No leads passed qualification in this run.', 'Held for manual review (1)', 'HOLD', 'Reasoning and evidence', 'Cannot pass with missing required fields (hqCountry)']) {
+      assert.ok(text.includes(expected), `PDF text should include "${expected}"`);
+    }
   });
 
   it('creates the output folder if needed', async () => {
