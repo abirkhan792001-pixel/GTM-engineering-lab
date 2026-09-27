@@ -3,7 +3,7 @@ import { recipientGap, sendableEmail } from '../../04_contacts/index';
 import { assignVariant, FIRST_TOUCH_EXPERIMENT, renderTemplate, type Experiment } from '../../06_learning/index';
 import { PERSONAS, selectPersona, type Persona } from '../../shared/personas';
 import { EmailDraftSchema, type EmailDraft, type Lead, type Signal } from '../../shared/types';
-import { VOICE, type VoiceGuidelines } from '../../shared/voice';
+import { VOICE, VOICE_OFFER, type VoiceGuidelines } from '../../shared/voice';
 
 // Simulates drafting a first touch (as an LLM would) for a Resend-style sender.
 // Safeguard: this adapter has no send method. It only produces DRAFTs that need
@@ -87,9 +87,10 @@ function lint(subject: string, body: string, voice: VoiceGuidelines): EmailDraft
 export function createMockEmail(options: EmailOptions = {}): EmailAdapter {
   const voice = options.voice ?? VOICE;
   const personas = options.personas ?? PERSONAS.personas;
-  const senderName = options.senderName ?? 'The GTM Engineering Lab team';
-  const offer = options.offer ?? DEFAULT_OFFER;
-  const cta = options.cta ?? DEFAULT_CTA;
+  // A client profile's voice.md can set the offer, ask and sign-off (see parseVoiceOffer).
+  const senderName = options.senderName ?? VOICE_OFFER.signOff ?? 'The GTM Engineering Lab team';
+  const offer = options.offer ?? VOICE_OFFER.offer ?? DEFAULT_OFFER;
+  const cta = options.cta ?? VOICE_OFFER.ask ?? DEFAULT_CTA;
   const experiment = options.experiment ?? FIRST_TOUCH_EXPERIMENT;
 
   return {

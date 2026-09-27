@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import icpJson from '../context/icp.json';
+import { readContextFile } from './profile';
 
-// Typed, validated view of src/context/icp.json. Config is input like any other:
-// a typo or a rubric that does not sum to 100 fails at load time, not mid-run.
+// Typed, validated view of icp.json (src/context/, or the GTM_PROFILE folder). Config is
+// input like any other: a typo or a rubric that does not sum to 100 fails at load time.
 
 const Points = z.number().int().nonnegative();
 
@@ -45,4 +45,10 @@ export const IcpSchema = z
   });
 export type Icp = z.infer<typeof IcpSchema>;
 
-export const ICP: Icp = IcpSchema.parse(icpJson);
+export function parseIcp(json: string, label = 'icp.json'): Icp {
+  const parsed = IcpSchema.safeParse(JSON.parse(json));
+  if (!parsed.success) throw new Error(`${label} is invalid:\n${z.prettifyError(parsed.error)}`);
+  return parsed.data;
+}
+
+export const ICP: Icp = parseIcp(readContextFile('icp.json'));

@@ -25,11 +25,13 @@ src/
   04_contacts/       find and verify the buyer to email
   05_activation/     CRM, email draft, Slack alert
   06_learning/       A/B test the outreach
-  context/           ICP, personas, voice rules
+  context/           ICP, personas, voice rules (the template)
+  research/          research a company into a client profile (npm run research)
   shared/            schemas and config loaders
   runPipeline.ts     run stages 1-5 end to end
   runtime.ts         pick mock or live integrations from the config
 reports/             generated PDF briefs (git-ignored)
+profiles/            client profiles written by npm run research (GTM_PROFILE=<name>)
 tests/               one test file per stage, plus a layout check
 docs/                design notes
 ```
@@ -60,6 +62,7 @@ npm run pipeline:run  # full pipeline on 3 mock leads
 | `npm run qualify:local` | Free scoring with a local model (needs Ollama) |
 | `npm run server:dev` | Webhook server on port 3000 (see below) |
 | `npm run report:pdf` | Full pipeline plus a PDF executive brief in `reports/` |
+| `npm run research -- <domain>` | Research a company and write its client profile (see below) |
 
 Everything runs offline on mock data unless you set `MOCK_MODE=false` or run `qualify:live`.
 
@@ -159,9 +162,40 @@ The brief stays at 1-2 pages by profiling two leads: the highest-scoring qualifi
 first, then held leads if a slot is free. Everyone else is in the outcome table. Runs on mock data carry a demo banner, and the A/B card only names a winner once
 there is engagement data behind it. The layout code is in `src/shared/pdfReporter.ts`.
 
+## Research a company into a client profile
+
+Instead of writing the rules by hand, let the engine research them from public information:
+
+```sh
+npm run research -- peec.ai                       # website only
+npm run research -- peec.ai --notes client-brief.md   # plus what you already know
+```
+
+It reads the company's website (respecting robots.txt; pricing, customers, product, about
+and careers pages first), searches the web for reviews, competitors and news when
+`FIRECRAWL_API_KEY` is set, and asks the model four focused questions: company brief, ideal
+customer profile, buyer personas, and voice. It needs `OLLAMA_MODEL` (free, local; a 7B model
+such as `qwen2.5:7b` works much better than a 3B one) or `ANTHROPIC_API_KEY`.
+
+The model drafts and code checks: every claim must cite one of the sources, customer names
+and proof points must be quoted word for word from their source or they are dropped, and the
+ICP keeps the template's scoring and thresholds. It writes `profiles/<name>/`:
+
+| File | What it holds |
+|---|---|
+| `icp.json` | Target industries, size, countries, dealbreakers |
+| `personas.json` | Who to contact and their pain points |
+| `voice.md` | Tone, the offer, sign-off, verified proof points, email limits |
+| `knowledge.md` | Research brief: products, pricing, customers, competitors, objections, buying signals, what was dropped and why, and a review checklist |
+| `sources.json` | Every page used, with its id |
+
+Review `knowledge.md` (checklist at the top), then run the engine on the profile by setting
+`GTM_PROFILE=<name>` in `.env` or your shell. Drafts then use the client's offer, question and
+sign-off. Unset it to go back to the template in `src/context/`. Tests always use the template.
+
 ## Customize
 
-Edit the files in `src/context/` to fit your market:
+Edit the files in `src/context/` (or a profile folder) to fit your market:
 
 - `icp.json`: target industries, company size, countries, dealbreakers and scoring
 - `personas.json`: buyer titles and pain points

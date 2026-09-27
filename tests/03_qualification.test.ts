@@ -339,6 +339,7 @@ describe('03 qualification: local model evaluator (Ollama)', () => {
     assert.equal(body.model, 'llama3.2');
     assert.equal(body.stream, true, 'streamed, so a slow model never hits the 300s response-header limit');
     assert.equal(body.options.num_predict, 1024, 'a looping model is cut off');
+    assert.equal(body.options.num_ctx, 8192, "the rules at the start of the prompt fit in Ollama's context window");
     assert.deepEqual(body.messages.map((m: { role: string }) => m.role), ['system', 'user']);
     assert.match(body.messages[0].content, /ideal customer profile/);
     assert.match(body.messages[1].content, /northwind-data\.example/);

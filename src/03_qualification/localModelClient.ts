@@ -22,6 +22,10 @@ export const DEFAULT_OLLAMA_MODEL = 'llama3.2';
 export const DEFAULT_OLLAMA_MAX_OUTPUT_TOKENS = 1024;
 // Whole-request backstop, including loading the model into memory on a slow machine.
 export const DEFAULT_OLLAMA_TIMEOUT_MS = 600_000;
+// Context window (prompt + answer) in tokens. Ollama's own default is small (2-4k on many
+// versions) and it silently drops the start of a longer prompt, which is where the rules
+// are. 8k fits a qualification prompt and its answer with room to spare.
+export const DEFAULT_OLLAMA_CONTEXT_TOKENS = 8192;
 
 // The Response subset used, so tests can inject a fake with no network access.
 export type OllamaFetchLike = (input: string, init: RequestInit) => Promise<Pick<Response, 'ok' | 'status' | 'text'>>;
@@ -31,6 +35,7 @@ export interface OllamaClientOptions {
   fetch?: OllamaFetchLike;
   maxOutputTokens?: number;
   timeoutMs?: number;
+  contextTokens?: number;
 }
 
 interface OllamaChunk {
@@ -40,20 +45,31 @@ interface OllamaChunk {
   error?: string;
 }
 
-// Ollama constrains generation to this JSON schema, the same shape Claude is asked for.
-const OUTPUT_SCHEMA = z.toJSONSchema(ClaudeQualificationSchema);
+// Qualification answers are constrained to this schema (with real enums, which Ollama
+// enforces while generating; Anthropic's format helper only describes them).
+const QUALIFICATION_SCHEMA = z.toJSONSchema(ClaudeQualificationSchema);
 
-interface ParseParams {
+export interface OllamaChatRequest {
   model: string;
-  system?: string;
-  messages: { role: string; content: unknown }[];
+  messages: { role: string; content: string }[];
+  // JSON schema the answer must follow.
+  schema: unknown;
 }
 
-export function createOllamaClient(options: OllamaClientOptions = {}): ClaudeClient {
+export interface OllamaChatResult {
+  text: string;
+  // 'length' when the token cap cut the answer off.
+  doneReason: string | undefined;
+}
+
+// One structured-output chat call to Ollama. Throws with a readable message when Ollama is
+// unreachable, answers with an error, or times out.
+export function createOllamaChat(options: OllamaClientOptions = {}) {
   const baseUrl = (options.baseUrl ?? DEFAULT_OLLAMA_BASE_URL).replace(/\/+$/, '');
   const doFetch: OllamaFetchLike = options.fetch ?? ((input, init) => fetch(input, init));
   const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_OLLAMA_MAX_OUTPUT_TOKENS;
   const timeoutMs = options.timeoutMs ?? DEFAULT_OLLAMA_TIMEOUT_MS;
+  const contextTokens = options.contextTokens ?? DEFAULT_OLLAMA_CONTEXT_TOKENS;
   const failure = (what: string, error: unknown) =>
     new Error(
       error instanceof Error && error.name === 'TimeoutError'
@@ -61,12 +77,7 @@ export function createOllamaClient(options: OllamaClientOptions = {}): ClaudeCli
         : `${what}: ${error instanceof Error ? error.message : String(error)}`,
     );
 
-  const parse = async (params: ParseParams) => {
-    const messages = [
-      ...(params.system ? [{ role: 'system', content: params.system }] : []),
-      ...params.messages.map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })),
-    ];
-
+  return async (request: OllamaChatRequest): Promise<OllamaChatResult> => {
     let res: Awaited<ReturnType<OllamaFetchLike>>;
     try {
       // Streamed: Ollama sends response headers at once and tokens as it generates them.
@@ -77,11 +88,11 @@ export function createOllamaClient(options: OllamaClientOptions = {}): ClaudeCli
         headers: { 'content-type': 'application/json' },
         signal: AbortSignal.timeout(timeoutMs),
         body: JSON.stringify({
-          model: params.model,
-          messages,
-          format: OUTPUT_SCHEMA,
+          model: request.model,
+          messages: request.messages,
+          format: request.schema,
           stream: true,
-          options: { temperature: 0, num_predict: maxOutputTokens },
+          options: { temperature: 0, num_predict: maxOutputTokens, num_ctx: contextTokens },
         }),
       });
     } catch (error) {
@@ -112,6 +123,25 @@ export function createOllamaClient(options: OllamaClientOptions = {}): ClaudeCli
       text += chunk.message?.content ?? '';
       if (chunk.done) doneReason = chunk.done_reason;
     }
+    return { text, doneReason };
+  };
+}
+
+interface ParseParams {
+  model: string;
+  system?: string;
+  messages: { role: string; content: unknown }[];
+}
+
+export function createOllamaClient(options: OllamaClientOptions = {}): ClaudeClient {
+  const chat = createOllamaChat(options);
+
+  const parse = async (params: ParseParams) => {
+    const messages = [
+      ...(params.system ? [{ role: 'system', content: params.system }] : []),
+      ...params.messages.map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })),
+    ];
+    const { text, doneReason } = await chat({ model: params.model, messages, schema: QUALIFICATION_SCHEMA });
 
     // 'length' means the token cap cut the answer off; the evaluator reports it as truncated.
     if (doneReason === 'length') return { stop_reason: 'max_tokens', parsed_output: null, content: [] };

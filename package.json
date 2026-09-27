@@ -19,6 +19,7 @@
     "pipeline:run": "tsx src/runPipeline.ts",
     "learn:dev": "tsx src/06_learning/run.ts",
     "server:dev": "tsx src/01_signals/server.ts",
+    "research": "tsx src/research/run.ts",
     "report:pdf": "tsx src/runPipeline.ts --export-pdf"
   },
   "dependencies": {

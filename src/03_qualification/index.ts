@@ -18,11 +18,15 @@ export {
   type RubricScorer,
 } from './evaluator';
 export {
+  createOllamaChat,
   createOllamaClient,
   DEFAULT_OLLAMA_BASE_URL,
+  DEFAULT_OLLAMA_CONTEXT_TOKENS,
   DEFAULT_OLLAMA_MAX_OUTPUT_TOKENS,
   DEFAULT_OLLAMA_MODEL,
   DEFAULT_OLLAMA_TIMEOUT_MS,
+  type OllamaChatRequest,
+  type OllamaChatResult,
   type OllamaClientOptions,
   type OllamaFetchLike,
 } from './localModelClient';

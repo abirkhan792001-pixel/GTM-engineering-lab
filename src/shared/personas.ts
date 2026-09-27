@@ -1,7 +1,7 @@
 import { z } from 'zod';
-import personasJson from '../context/personas.json';
+import { readContextFile } from './profile';
 
-// Typed, validated view of src/context/personas.json.
+// Typed, validated view of personas.json (src/context/, or the GTM_PROFILE folder).
 
 const Count = z.number().int().nonnegative();
 
@@ -22,7 +22,13 @@ export const PersonasSchema = z.strictObject({
 });
 export type Personas = z.infer<typeof PersonasSchema>;
 
-export const PERSONAS: Personas = PersonasSchema.parse(personasJson);
+export function parsePersonas(json: string, label = 'personas.json'): Personas {
+  const parsed = PersonasSchema.safeParse(JSON.parse(json));
+  if (!parsed.success) throw new Error(`${label} is invalid:\n${z.prettifyError(parsed.error)}`);
+  return parsed.data;
+}
+
+export const PERSONAS: Personas = parsePersonas(readContextFile('personas.json'));
 
 // First persona whose headcount range contains the account; the first persona if headcount is unknown.
 export function selectPersona(headcount: number | null, personas: Persona[] = PERSONAS.personas): Persona {
