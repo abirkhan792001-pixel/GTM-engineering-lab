@@ -88,3 +88,80 @@ export const LeadSchema = z.strictObject({
   updatedAt: EpochMs,
 });
 export type Lead = z.infer<typeof LeadSchema>;
+
+// ---------------------------------------------------------------------------
+// 04 Activation
+// ---------------------------------------------------------------------------
+
+export const EmailDraftSchema = z.strictObject({
+  // Safeguard: a draft can only ever be a DRAFT awaiting human approval.
+  status: z.literal('DRAFT'),
+  requiresApproval: z.literal(true),
+  // Null until a verified contact email is resolved; a draft without one cannot be approved.
+  to: z.email().nullable(),
+  persona: NonEmptyString,
+  subject: NonEmptyString,
+  body: NonEmptyString,
+  evidenceUsed: z.array(NonEmptyString),
+  checks: z.array(z.strictObject({ name: NonEmptyString, passed: z.boolean(), detail: z.string() })),
+  reviewNotes: z.array(NonEmptyString),
+});
+export type EmailDraft = z.infer<typeof EmailDraftSchema>;
+
+export const SlackChannelSchema = z.enum(['#hot-leads', '#manual-review']);
+export type SlackChannel = z.infer<typeof SlackChannelSchema>;
+
+export const SlackAlertSchema = z.strictObject({
+  channel: SlackChannelSchema,
+  text: NonEmptyString,
+  sentAt: EpochMs,
+});
+export type SlackAlert = z.infer<typeof SlackAlertSchema>;
+
+export const CrmSyncSchema = z.strictObject({
+  action: z.enum(['created', 'updated']),
+  companyRecordId: NonEmptyString,
+  dealId: NonEmptyString,
+  url: z.url(),
+});
+export type CrmSync = z.infer<typeof CrmSyncSchema>;
+
+export const ActivationOutcomeSchema = z.enum(['suppressed', 'activated', 'manual_review', 'disqualified']);
+export type ActivationOutcome = z.infer<typeof ActivationOutcomeSchema>;
+
+export const ActivationResultSchema = z
+  .strictObject({
+    leadId: NonEmptyString,
+    companyDomain: CompanyDomainSchema,
+    outcome: ActivationOutcomeSchema,
+    active: z.boolean(),
+    reason: NonEmptyString,
+    crm: CrmSyncSchema.nullable(),
+    draft: EmailDraftSchema.nullable(),
+    alerts: z.array(SlackAlertSchema),
+    log: z.array(NonEmptyString),
+    activatedAt: EpochMs,
+  })
+  // Routing invariants: each outcome may only carry the side effects it is allowed to have.
+  .superRefine((r, ctx) => {
+    const fail = (message: string) => ctx.addIssue({ code: 'custom', message: `${r.outcome}: ${message}` });
+    const channels = r.alerts.map(a => a.channel);
+    switch (r.outcome) {
+      case 'activated':
+        if (!r.active) fail('must be active');
+        if (!r.crm || !r.draft) fail('requires a CRM sync and a draft');
+        if (!channels.includes('#hot-leads')) fail('requires a #hot-leads alert');
+        break;
+      case 'manual_review':
+        if (!r.active) fail('must stay active');
+        if (r.crm || r.draft) fail('must not sync to CRM or draft email');
+        if (!channels.includes('#manual-review')) fail('requires a #manual-review alert');
+        break;
+      case 'suppressed':
+      case 'disqualified':
+        if (r.active) fail('must be inactive');
+        if (r.crm || r.draft || r.alerts.length > 0) fail('must have no CRM sync, draft or alert');
+        break;
+    }
+  });
+export type ActivationResult = z.infer<typeof ActivationResultSchema>;
