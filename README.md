@@ -6,7 +6,7 @@ A code-first Go-To-Market (GTM) engineering framework built in TypeScript. Captu
 ```
 src/
   01_signals/        intent signal intake (mock generator for now)
-  02_enrichment/     waterfall enrichment (Apollo, Firecrawl)
+  02_enrichment/     waterfall enrichment: Apollo first, Firecrawl only if industry/headcount missing (mock providers)
   03_qualification/  LLM scoring (Claude + Zod) and deterministic gates
   04_activation/     CRM sync and email drafts
   05_learning/       campaign performance and A/B test analysis
@@ -23,4 +23,5 @@ Requires Node.js 22+.
 npm install
 npm run typecheck   # tsc --noEmit
 npm run signals     # emit 3 mock leads validated against LeadSchema
+npm run enrich:dev  # run the mock leads through the enrichment waterfall, with cost per lead
 ```
