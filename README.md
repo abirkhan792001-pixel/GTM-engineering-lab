@@ -154,4 +154,5 @@ Edit the files in `src/context/` to fit your market:
 - **Live qualification** runs `qualify:live` on demand. It needs an `ANTHROPIC_API_KEY`
   repository secret and spends a few API credits.
 
-See `docs/reference-architecture-notes.md` for the design background.
+See `docs/reference-architecture-notes.md` for the design background, and
+`docs/allbound-architecture-notes.md` for how the pipeline maps to an allbound (inbound + outbound) motion.
