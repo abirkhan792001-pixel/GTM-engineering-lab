@@ -7,6 +7,8 @@ export interface AlertContext {
   sentAt: number;
   crm?: CrmSync | null;
   draft?: EmailDraft | null;
+  // Set when the lead skips outreach and goes straight to sales: what the rep should do.
+  handoff?: string;
 }
 
 export interface NotifierAdapter {
@@ -21,8 +23,9 @@ function keyEvidence(lead: Lead, limit = 4): string[] {
 
 export function formatAlert(lead: Lead, channel: SlackChannel, context: AlertContext): string {
   const q = lead.qualification;
-  const header =
-    channel === '#hot-leads'
+  const header = context.handoff
+    ? `:raising_hand: *Hand-raiser, reply personally:* ${lead.companyDomain} (ICP score ${q?.score ?? '?'})`
+    : channel === '#hot-leads'
       ? `:fire: *Hot lead:* ${lead.companyDomain} (ICP score ${q?.score ?? '?'})`
       : `:mag: *Needs review:* ${lead.companyDomain} (ICP score ${q?.score ?? '?'}, ${q?.decision ?? 'unqualified'})`;
   const lines = [header];
@@ -30,7 +33,15 @@ export function formatAlert(lead: Lead, channel: SlackChannel, context: AlertCon
     lines.push(`*Missing fields:* ${q?.missingFields.length ? q.missingFields.join(', ') : 'none (score below pass threshold)'}`);
   }
   lines.push('*Why:*', ...keyEvidence(lead).map(line => `• ${line}`));
-  if (channel === '#hot-leads') {
+  if (context.handoff) {
+    const c = lead.contact;
+    lines.push(
+      c?.person
+        ? `*Contact:* ${c.person.fullName}, ${c.person.title}${c.email ? ` <${c.email}>` : ''} (${c.status})`
+        : '*Contact:* not identified; reply to whoever sent the request.',
+      `*Next step:* ${context.handoff}.`,
+    );
+  } else if (channel === '#hot-leads') {
     const c = lead.contact;
     const person = c?.person ? `${c.person.fullName}, ${c.person.title}` : null;
     lines.push(

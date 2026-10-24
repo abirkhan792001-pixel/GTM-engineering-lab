@@ -1,0 +1,6 @@
+{
+  "version": "routing-v1",
+  "description": "Who gets the first message. Leads with a fresh signal listed in routeToSalesSignals skip outreach and go straight to sales. Every other qualified lead is ranked by its warmest fresh signal's tier, then ICP score, then how recent that signal is; at most dailyOutreachLimit first-touch emails go out per day.",
+  "routeToSalesSignals": ["demo-request"],
+  "dailyOutreachLimit": 5
+}
