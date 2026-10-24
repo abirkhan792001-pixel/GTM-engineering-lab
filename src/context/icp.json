@@ -1,5 +1,5 @@
 {
-  "version": "icp-v2",
+  "version": "icp-v3",
   "description": "Template ICP. Replace with your real targeting before running live batches.",
   "companySize": {
     "minEmployees": 20,
@@ -45,13 +45,47 @@
       "companySize": 25,
       "country": 15
     },
-    "signalPoints": {
-      "contact-form": 30,
-      "demo-request": 30,
-      "hiring": 30,
-      "signup": 20,
-      "pricing-page-visit": 20,
-      "default": 10
+    "signals": {
+      "demo-request": {
+        "tier": 5,
+        "points": 30
+      },
+      "contact-form": {
+        "tier": 5,
+        "points": 30
+      },
+      "signup": {
+        "tier": 5,
+        "points": 28
+      },
+      "linkedin-own-post-engagement": {
+        "tier": 4,
+        "points": 24
+      },
+      "pricing-page-visit": {
+        "tier": 4,
+        "points": 22
+      },
+      "linkedin-profile-view": {
+        "tier": 4,
+        "points": 20
+      },
+      "linkedin-company-follow": {
+        "tier": 4,
+        "points": 20
+      },
+      "linkedin-competitor-post-engagement": {
+        "tier": 4,
+        "points": 18
+      },
+      "hiring": {
+        "tier": 3,
+        "points": 15
+      },
+      "default": {
+        "tier": 1,
+        "points": 5
+      }
     },
     "maxSignalAgeDays": 30
   },
@@ -63,6 +97,6 @@
       "headcount",
       "hqCountry"
     ],
-    "notes": "Hard gates disqualify only on verified evidence of a dealbreaker; unknown values never disqualify, they hold. Missing evidence earns zero points and is listed in missingFields. Signal points decay linearly to zero at maxSignalAgeDays; only the strongest fresh signal counts. A pass needs score >= passThreshold and no missing required fields. Below holdThreshold is a poor fit and is disqualified with score 0. CRM and suppression dealbreakers are enforced at activation, not here."
+    "notes": "Hard gates disqualify only on verified evidence of a dealbreaker; unknown values never disqualify, they hold. Missing evidence earns zero points and is listed in missingFields. Each signal type has a warmth tier (5 hand-raise, 4 engagement, 3 trigger event, 2 fit, 1 data only) and points; a warmer tier never earns fewer points than a colder one. Signal points decay linearly to zero at maxSignalAgeDays; only the strongest fresh signal counts. A pass needs score >= passThreshold and no missing required fields. Below holdThreshold is a poor fit and is disqualified with score 0. CRM and suppression dealbreakers are enforced at activation, not here."
   }
 }

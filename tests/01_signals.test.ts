@@ -2,16 +2,17 @@ import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { afterEach, describe, it } from 'node:test';
-import { generateMockCohort, generateMockSignals, IntakeError, IntentSignalSchema, intentToLead, MOCK_AS_OF_MS, normalizeDomain } from '../src/01_signals/index';
+import { generateMockCohort, generateMockSignals, IntakeError, IntentSignalSchema, intentToLead, mergeByDomain, mergeLead, MOCK_AS_OF_MS, normalizeDomain } from '../src/01_signals/index';
 import { createSignalServer } from '../src/01_signals/server';
 import { createApprovalService, createMockSender } from '../src/05_activation/index';
+import type { PipelineResult } from '../src/runPipeline';
 import { buildRuntime } from '../src/runtime';
 import { loadConfig } from '../src/shared/config';
-import { EnrichmentResultSchema, LeadSchema, QualificationSchema, SignalSchema } from '../src/shared/types';
+import { EnrichmentResultSchema, LeadSchema, QualificationSchema, SignalSchema, type Lead } from '../src/shared/types';
 import { makeLead, signal } from './helpers';
 
 describe('01 signals: mock generation', () => {
-  it('emits the three scenarios, each a valid signal-stage lead', () => {
+  it('emits the four scenarios, each a valid signal-stage lead', () => {
     const leads = generateMockSignals();
     assert.deepEqual(
       leads.map(l => [l.scenario, l.lead.companyDomain]),
@@ -19,6 +20,7 @@ describe('01 signals: mock generation', () => {
         ['strong-fit', 'northwind-data.example'],
         ['missing-info', 'quietpeak.example'],
         ['disqualify', 'snapsnack.example'],
+        ['hand-raise', 'ravenhill.example'],
       ],
     );
     for (const { lead } of leads) {
@@ -31,8 +33,8 @@ describe('01 signals: mock generation', () => {
 
   it('keeps multiple distinct signals on one account', () => {
     const northwind = generateMockSignals()[0]!.lead;
-    assert.equal(northwind.signals.length, 2);
-    assert.equal(new Set(northwind.signals.map(s => s.id)).size, 2);
+    assert.equal(northwind.signals.length, 3);
+    assert.equal(new Set(northwind.signals.map(s => s.id)).size, 3);
   });
 
   it('is deterministic for a fixed as-of time', () => {
@@ -127,6 +129,73 @@ describe('01 signals: webhook intake', () => {
   });
 });
 
+describe('01 signals: LinkedIn engagement intake', () => {
+  const now = MOCK_AS_OF_MS;
+  const id = () => 'abc123';
+  const linkedin = (extra: Record<string, unknown>) => ({ eventType: 'linkedin_engagement', source: 'linkedin', companyDomain: 'acme.example', ...extra });
+
+  it('maps each engagement to its tiered signal type and keeps who engaged', () => {
+    const lead = intentToLead(
+      IntentSignalSchema.parse(linkedin({ engagement: 'competitor_post', name: 'Mia Chen', title: 'RevOps Manager', linkedinUrl: 'https://linkedin.example/in/mia' })),
+      { now, id },
+    );
+    assert.deepEqual(lead.signals[0]!.rawData, {
+      signalType: 'linkedin-competitor-post-engagement',
+      contactName: 'Mia Chen',
+      contactTitle: 'RevOps Manager',
+      contactLinkedinUrl: 'https://linkedin.example/in/mia',
+    });
+    const types = (['own_post', 'profile_view', 'company_follow'] as const).map(engagement => intentToLead(IntentSignalSchema.parse(linkedin({ engagement })), { now, id }).signals[0]!.rawData.signalType);
+    assert.deepEqual(types, ['linkedin-own-post-engagement', 'linkedin-profile-view', 'linkedin-company-follow']);
+  });
+
+  it('requires engagement for linkedin_engagement, and only there', () => {
+    assert.ok(!IntentSignalSchema.safeParse(linkedin({})).success, 'missing engagement');
+    assert.ok(!IntentSignalSchema.safeParse(linkedin({ engagement: 'reposted' })).success, 'unknown engagement');
+    assert.ok(!IntentSignalSchema.safeParse({ eventType: 'signup', source: 'app', companyDomain: 'acme.example', engagement: 'own_post' }).success, 'engagement on another event');
+    assert.ok(!IntentSignalSchema.safeParse(linkedin({ engagement: 'own_post', linkedinUrl: 'not a url' })).success, 'bad url');
+  });
+});
+
+describe('01 signals: one lead per account', () => {
+  const at = (hours: number) => MOCK_AS_OF_MS - hours * 3_600_000;
+  const lead = (id: string, rawData: Record<string, unknown>, hoursAgo = 1, domain = 'acme.example'): Lead =>
+    LeadSchema.parse({
+      id,
+      companyDomain: domain,
+      signals: [{ id: `sig_${id}`, source: 'webhook', timestamp: at(hoursAgo), rawData }],
+      enrichment: [],
+      qualification: null,
+      contact: null,
+      createdAt: at(hoursAgo),
+      updatedAt: at(hoursAgo),
+    });
+
+  it('adds new signals to the existing lead and clears downstream results', () => {
+    const first = { ...lead('lead_a', { signalType: 'hiring' }, 5), qualification: { score: 80, decision: 'pass' as const, evidence: ['x'], missingFields: [] } };
+    const merged = mergeLead(first, lead('lead_b', { signalType: 'signup' }, 1), MOCK_AS_OF_MS)!;
+    assert.equal(merged.id, 'lead_a');
+    assert.deepEqual(merged.signals.map(s => s.rawData.signalType), ['hiring', 'signup']);
+    assert.deepEqual([merged.qualification, merged.contact, merged.enrichment], [null, null, []]);
+    assert.deepEqual([merged.createdAt, merged.updatedAt], [at(5), MOCK_AS_OF_MS]);
+  });
+
+  it('drops exact repeats (a retried webhook) but keeps distinct signals of the same type', () => {
+    const first = lead('lead_a', { signalType: 'signup' });
+    assert.equal(mergeLead(first, lead('lead_b', { signalType: 'signup' })), null, 'same source, time and payload');
+    assert.equal(mergeLead(first, lead('lead_b', { signalType: 'signup' }, 2))!.signals.length, 2, 'same type, different time');
+  });
+
+  it('refuses to merge different accounts', () => {
+    assert.throws(() => mergeLead(lead('a', {}), lead('b', {}, 1, 'other.example')), /different accounts/);
+  });
+
+  it('collapses a batch to one lead per domain, in first-seen order', () => {
+    const merged = mergeByDomain([lead('a1', { n: 1 }), lead('b1', { n: 2 }, 1, 'beta.example'), lead('a2', { n: 3 }), lead('a3', { n: 1 })]);
+    assert.deepEqual(merged.map(l => [l.id, l.signals.length]), [['a1', 2], ['b1', 1]]);
+  });
+});
+
 describe('01 signals: webhook server', () => {
   const runtime = buildRuntime(loadConfig({}));
   let server: Server;
@@ -199,6 +268,72 @@ describe('01 signals: webhook server', () => {
     assert.equal((await post(signal)).status, 401);
     assert.equal((await post(signal, { 'x-webhook-secret': 'wrong!' })).status, 401);
     assert.equal((await post(signal, { 'x-webhook-secret': 's3cret' })).status, 202);
+  });
+
+  it('merges signals for the same account into one lead and re-runs it', async () => {
+    await start();
+    const first = (await (await post({ eventType: 'pricing_page_visit', source: 'website', companyDomain: 'northwind-data.example' })).json()) as { leadId: string; status: string };
+    assert.equal(first.status, 'accepted');
+    await waitForJob(first.leadId);
+
+    const res = await post({ eventType: 'linkedin_engagement', engagement: 'own_post', source: 'linkedin', companyDomain: 'https://www.northwind-data.example/', name: 'Lena Hoffmann', title: 'Director of Sales Operations' });
+    assert.equal(res.status, 202);
+    const second = (await res.json()) as { leadId: string; status: string; signalCount: number };
+    assert.deepEqual([second.leadId, second.status, second.signalCount], [first.leadId, 'merged', 2]);
+    const job = await waitForJob(first.leadId);
+    assert.equal((job as { signalCount?: number }).signalCount, 2);
+    assert.match(String((job.result!.contact as { reason: string }).reason), /named by the linkedin-own-post-engagement signal/);
+  });
+
+  it('answers 200 to an exact repeat and runs nothing', async () => {
+    let runs = 0;
+    await start({ process: async () => { runs++; throw new Error('not needed'); } });
+    const signal = { eventType: 'signup', source: 'app', companyDomain: 'acme.example', occurredAt: '2026-09-26T10:00:00Z' };
+    const { leadId } = (await (await post(signal)).json()) as { leadId: string };
+    await waitForJob(leadId);
+    const repeat = await post(signal);
+    assert.equal(repeat.status, 200);
+    assert.deepEqual(((await repeat.json()) as { status: string }).status, 'duplicate');
+    assert.equal(runs, 1);
+  });
+
+  it('never runs one lead twice at once: a signal mid-run queues one more run', async () => {
+    const seen: number[] = [];
+    let active = 0;
+    let maxActive = 0;
+    const process = async (lead: Lead): Promise<PipelineResult> => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      seen.push(lead.signals.length);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      active--;
+      throw new Error('stop here');
+    };
+    await start({ process });
+    const body = (eventType: string) => ({ eventType, source: 'app', companyDomain: 'acme.example' });
+    const { leadId } = (await (await post(body('signup'))).json()) as { leadId: string };
+    await post(body('contact_form'));
+    await post(body('demo_request'));
+    await waitForJob(leadId);
+    assert.equal(maxActive, 1);
+    assert.deepEqual(seen.at(-1), 3, 'the last run saw every signal');
+    assert.ok(seen.length <= 3);
+  });
+
+  it('withdraws a pending draft when a demo request hands the lead to sales', async () => {
+    const approvals = createApprovalService({ sender: createMockSender(), crm: runtime.crm });
+    await start({ approvals });
+    const { leadId } = (await (await post({ eventType: 'pricing_page_visit', source: 'website', companyDomain: 'northwind-data.example' })).json()) as { leadId: string };
+    const first = await waitForJob(leadId);
+    assert.equal(first.result!.outcome, 'activated');
+    const draftId = String(first.result!.draftId);
+    assert.equal(approvals.get(draftId)!.status, 'pending_approval');
+
+    await post({ eventType: 'demo_request', source: 'website', email: 'lena.hoffmann@northwind-data.example', name: 'Lena Hoffmann', title: 'Director of Sales Operations' });
+    const second = await waitForJob(leadId);
+    assert.equal(second.result!.outcome, 'routed_to_sales');
+    assert.equal(approvals.get(draftId)!.status, 'blocked');
+    assert.match(String(approvals.get(draftId)!.history.at(-1)!.note), /now routed_to_sales/);
   });
 
   it('reports mode and integrations on /health', async () => {

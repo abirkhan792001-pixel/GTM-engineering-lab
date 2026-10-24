@@ -45,9 +45,11 @@ export interface ProspectProfile {
   evidence: string[];
   buyer: { name: string; title: string; email: string | null; emailStatus: string } | null;
   draft: { to: string | null; subject: string; body: string; variantId: string; reviewNotes: string[] } | null;
+  // Why there is no draft for a passing lead: handed to sales, or queued over the daily limit.
+  noDraftReason: string | null;
 }
 
-export interface HeldProfile extends Omit<ProspectProfile, 'status' | 'buyer' | 'draft'> {
+export interface HeldProfile extends Omit<ProspectProfile, 'status' | 'buyer' | 'draft' | 'noDraftReason'> {
   status: 'Hold';
   // The qualifier's "Held: ..." line, e.g. the score band or the missing fields.
   reason: string;
@@ -140,7 +142,7 @@ export function buildReportModel(input: ReportInput): ReportModel {
       domain: lead.companyDomain,
       decision: lead.qualification?.decision ?? 'unqualified',
       score: lead.qualification?.score ?? null,
-      outcome: activation.outcome.replace('_', ' '),
+      outcome: activation.outcome.replaceAll('_', ' '),
     })),
     omittedProspects: Math.max(0, passing.length - maxProfiles),
     prospects: passing.slice(0, maxProfiles).map(({ lead, activation }) => {
@@ -153,6 +155,7 @@ export function buildReportModel(input: ReportInput): ReportModel {
           ? { name: c.person.fullName, title: c.person.title, email: c.email, emailStatus: c.status === 'verified' ? 'verified' : `not verified (${c.emailStatus ?? 'no email'})` }
           : null,
         draft: d ? { to: d.to, subject: d.subject, body: d.body, variantId: d.variantId, reviewNotes: d.reviewNotes } : null,
+        noDraftReason: d ? null : activation.reason,
       };
     }),
     omittedHeld: Math.max(0, holding.length - maxHeldProfiles),
@@ -384,6 +387,10 @@ export async function writeExecutiveReport(input: ReportInput, outPath: string, 
       doc.font('Helvetica').fontSize(9.5).fillColor(COLOR.ink).text(text(p.draft.body), left + pad, bodyY, { width: innerW, lineGap: 1.5 });
       doc.font('Helvetica').fontSize(7.5).fillColor(COLOR.inkMuted).text(text(status), left + pad, bodyY + bodyH + 10, { width: innerW });
       doc.y = y + boxH + 14;
+    } else if (p.noDraftReason) {
+      doc.moveDown(0.8).font('Helvetica-Bold').fontSize(9).fillColor(COLOR.inkSecondary).text('Next step', left, doc.y, { width });
+      doc.font('Helvetica').fontSize(9.5).fillColor(COLOR.ink).text(text(p.noDraftReason), left, doc.y, { width });
+      doc.y += 14;
     }
   }
 
