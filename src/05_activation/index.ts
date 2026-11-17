@@ -1,7 +1,10 @@
+import type { Icp } from '../shared/icp';
+import type { Routing } from '../shared/routing';
 import { ActivationResultSchema, type ActivationResult, type EmailDraft, type Lead } from '../shared/types';
 import { mockCRM, type CrmAdapter } from './adapters/mockCRM';
 import { mockEmail, type EmailAdapter } from './adapters/mockEmail';
 import { mockNotifier, type NotifierAdapter } from './adapters/mockNotifier';
+import { salesHandoffSignal } from './priority';
 
 export { createMockCRM, type CrmAdapter } from './adapters/mockCRM';
 export { createMockEmail, type EmailAdapter } from './adapters/mockEmail';
@@ -23,10 +26,12 @@ export {
   type ProspectSender,
 } from './approvals';
 export { createLiveSlack, toBlockKit, type FetchLike, type LiveSlackOptions } from './adapters/liveSlack';
+export { compareForOutreach, planOutreach, salesHandoffSignal, type OutreachLane, type OutreachSlot, type PriorityOptions } from './priority';
 
 // Activation routing. Suppression is checked first for every lead, whatever its
 // decision; a suppressed lead gets no CRM write, draft or alert. Nothing here sends
-// email: a 'pass' ends at a DRAFT that needs human approval.
+// email: a 'pass' ends at a DRAFT that needs human approval, unless a fresh hand-raise
+// signal routes it straight to sales, or the batch planner (priority.ts) queued it.
 
 // Delivers a finished DRAFT somewhere a human can review it (e.g. a review inbox).
 // Never to the prospect: sending to a prospect needs an explicit approval step.
@@ -41,11 +46,16 @@ export interface ActivateOptions {
   notifier?: NotifierAdapter;
   // Optional: when set (live mode), each draft is also delivered for human review.
   delivery?: DraftDelivery;
+  // Set by the batch planner when a passing lead is over the daily outreach limit.
+  queuedReason?: string;
+  // Which signals hand a lead to sales, and their freshness window.
+  routing?: Routing;
+  icp?: Icp;
   now?: () => number;
 }
 
 export async function activateLead(lead: Lead, options: ActivateOptions = {}): Promise<ActivationResult> {
-  const { crm = mockCRM, email = mockEmail, notifier = mockNotifier, delivery, now = Date.now } = options;
+  const { crm = mockCRM, email = mockEmail, notifier = mockNotifier, delivery, queuedReason, routing, icp, now = Date.now } = options;
   const q = lead.qualification;
   if (!q) throw new Error(`Lead ${lead.id} has no qualification; run 03_qualification before activation`);
 
@@ -64,6 +74,21 @@ export async function activateLead(lead: Lead, options: ActivateOptions = {}): P
 
   switch (q.decision) {
     case 'pass': {
+      const handoff = salesHandoffSignal(lead, { asOfMs: activatedAt, routing, icp });
+      if (handoff) {
+        const reason = `Fresh ${handoff.type} signal: handed to sales for a personal reply, no sequence`;
+        const crmSync = await crm.syncContact(lead);
+        log.push(`CRM: ${crmSync.action} company ${crmSync.companyRecordId}, ${crmSync.contactRecordId ? `contact ${crmSync.contactRecordId}, ` : ''}deal ${crmSync.dealId}`);
+        log.push(`Routed to sales: ${handoff.type} [${handoff.signal.id}]; no outreach draft`);
+        const handoffStep = `Reply personally to the ${handoff.type} [${handoff.signal.id}]; this lead gets no outreach sequence`;
+        const alert = await notifier.sendAlert(lead, '#hot-leads', { sentAt: activatedAt, crm: crmSync, handoff: handoffStep });
+        log.push(`Slack: alert posted to ${alert.channel}`);
+        return ActivationResultSchema.parse({ ...base, outcome: 'routed_to_sales', active: true, reason, crm: crmSync, draft: null, alerts: [alert] });
+      }
+      if (queuedReason) {
+        log.push(`Queued: ${queuedReason}. No CRM sync, draft or alert yet.`);
+        return ActivationResultSchema.parse({ ...base, outcome: 'queued', active: true, reason: queuedReason, crm: null, draft: null, alerts: [] });
+      }
       const crmSync = await crm.syncContact(lead);
       log.push(`CRM: ${crmSync.action} company ${crmSync.companyRecordId}, ${crmSync.contactRecordId ? `contact ${crmSync.contactRecordId}, ` : ''}deal ${crmSync.dealId}`);
       const draft = await email.generateDraft(lead, { asOfMs: activatedAt });

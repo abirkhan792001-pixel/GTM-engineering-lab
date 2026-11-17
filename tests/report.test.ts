@@ -13,6 +13,9 @@ import { CLOCKS, freshAdapters, OFFLINE } from './helpers';
 
 const GENERATED_AT = new Date('2026-09-27T09:00:00Z');
 
+// The three mock leads that are not routed to sales: one pass, one hold, one disqualify.
+const outreachMocks = () => generateMockSignals().filter(s => s.scenario !== 'hand-raise').map(s => s.lead);
+
 async function run(leads = generateMockSignals().map(s => s.lead)): Promise<PipelineResult[]> {
   const adapters = freshAdapters();
   const results = [];
@@ -31,27 +34,35 @@ function pdfText(path: string): string {
 const tmp = () => mkdtempSync(join(tmpdir(), 'gtm-report-'));
 
 describe('report: model built from a pipeline run', () => {
-  it('computes the headline metrics for the three mock leads', async () => {
+  it('computes the headline metrics for the four mock leads', async () => {
     const model = buildReportModel({ generatedAt: GENERATED_AT, dataSource: 'demo', results: await run(), experiment: null });
     assert.deepEqual(model.metrics, {
-      leadsProcessed: 3,
-      passed: 1,
-      passRatePct: 33.3,
-      enrichmentCents: 8,
-      contactCents: 3,
+      leadsProcessed: 4,
+      passed: 2,
+      passRatePct: 50,
+      enrichmentCents: 9,
+      contactCents: 4,
       winner: { value: 'Pending', note: 'No sends or replies yet' },
     });
     assert.deepEqual(model.outcomes.map(o => [o.domain, o.decision, o.score, o.outcome]), [
-      ['northwind-data.example', 'pass', 98, 'activated'],
-      ['quietpeak.example', 'hold', 67, 'manual review'],
+      ['northwind-data.example', 'pass', 94, 'activated'],
+      ['quietpeak.example', 'hold', 68, 'manual review'],
       ['snapsnack.example', 'disqualify', 0, 'disqualified'],
+      ['ravenhill.example', 'pass', 100, 'routed to sales'],
     ]);
   });
 
-  it('profiles the qualified prospect with evidence, buyer and draft', async () => {
+  it('profiles a lead handed to sales with its next step instead of a draft', async () => {
     const [p] = buildReportModel({ generatedAt: GENERATED_AT, dataSource: 'demo', results: await run(), experiment: null }).prospects;
+    assert.deepEqual([p!.domain, p!.score, p!.draft], ['ravenhill.example', 100, null]);
+    assert.match(p!.noDraftReason!, /demo-request signal: handed to sales/);
+  });
+
+  it('profiles the qualified prospect with evidence, buyer and draft', async () => {
+    const [p] = buildReportModel({ generatedAt: GENERATED_AT, dataSource: 'demo', results: await run(outreachMocks()), experiment: null }).prospects;
     assert.equal(p!.companyName, 'Northwind Data');
-    assert.equal(p!.score, 98);
+    assert.equal(p!.score, 94);
+    assert.equal(p!.noDraftReason, null);
     assert.equal(p!.status, 'Pass');
     assert.equal(p!.scoredBy, 'Offline rubric scorer');
     assert.ok(p!.evidence.length === 4 && !p!.evidence.some(e => /^(Rubric score|Passed:)/.test(e)), 'bookkeeping lines dropped');
@@ -61,17 +72,17 @@ describe('report: model built from a pipeline run', () => {
   });
 
   it('profiles the held lead with its reason, missing data and evidence', async () => {
-    const model = buildReportModel({ generatedAt: GENERATED_AT, dataSource: 'demo', results: await run(), experiment: null });
+    const model = buildReportModel({ generatedAt: GENERATED_AT, dataSource: 'demo', results: await run(outreachMocks()), experiment: null });
     assert.equal(model.held.length, 1);
     const h = model.held[0]!;
-    assert.deepEqual([h.domain, h.score, h.status, h.scoredBy], ['quietpeak.example', 67, 'Hold', 'Offline rubric scorer']);
+    assert.deepEqual([h.domain, h.score, h.status, h.scoredBy], ['quietpeak.example', 68, 'Hold', 'Offline rubric scorer']);
     assert.equal(h.reason, 'Cannot pass with missing required fields (hqCountry)');
     assert.deepEqual(h.missingFields, ['hqCountry']);
     assert.ok(h.evidence.length > 0 && !h.evidence.some(e => /^(Rubric score|Held:)/.test(e)), 'bookkeeping lines dropped');
   });
 
   it('labels Claude-scored evidence with the model and hides the scorer line', async () => {
-    const [northwind, ...rest] = await run();
+    const [northwind, ...rest] = await run(outreachMocks());
     const q = northwind!.lead.qualification!;
     const claudeScored = { ...northwind!, lead: { ...northwind!.lead, qualification: { ...q, evidence: ['Scored by claude-sonnet-5 against rubric icp-v2', ...q.evidence] } } };
     const [p] = buildReportModel({ generatedAt: GENERATED_AT, dataSource: 'live', results: [claudeScored, ...rest], experiment: null }).prospects;
@@ -92,11 +103,10 @@ describe('report: model built from a pipeline run', () => {
   it('profiles only the highest scorers so the brief stays short', async () => {
     const results = await run([...generateMockSignals().map(s => s.lead), ...generateMockCohort()]);
     const model = buildReportModel({ generatedAt: GENERATED_AT, dataSource: 'demo', results, experiment: null });
-    assert.equal(model.outcomes.length, 13, 'every lead is in the outcome table');
+    assert.equal(model.outcomes.length, 14, 'every lead is in the outcome table');
     assert.equal(model.prospects.length, 2);
-    assert.equal(model.omittedProspects, 9);
-    assert.ok(model.prospects[0]!.score >= model.prospects[1]!.score);
-    assert.ok(model.prospects.every(p => p.score >= 99));
+    assert.equal(model.omittedProspects, 10);
+    assert.deepEqual(model.prospects.map(p => p.score), [100, 94]);
     assert.deepEqual([model.held.length, model.omittedHeld], [0, 1], 'held leads only get profile slots qualified prospects leave free');
   });
 
@@ -117,25 +127,26 @@ describe('report: text safety for built-in PDF fonts', () => {
 describe('report: PDF output', () => {
   it('writes a two-page A4 PDF with the brief content', async () => {
     const path = join(tmp(), 'brief.pdf');
-    const report = await writeExecutiveReport({ generatedAt: GENERATED_AT, dataSource: 'demo', results: await run(), experiment: null }, path, { compress: false });
+    const report = await writeExecutiveReport({ generatedAt: GENERATED_AT, dataSource: 'demo', results: await run(outreachMocks()), experiment: null }, path, { compress: false });
     const raw = readFileSync(path, 'latin1');
     assert.ok(raw.startsWith('%PDF-'));
     assert.ok(raw.trimEnd().endsWith('%%EOF'));
     assert.equal(report.pages, 2);
     assert.match(raw, /\/MediaBox \[0 0 595\.28 841\.89\]/, 'A4');
     const text = pdfText(path);
-    for (const expected of [REPORT_TITLE, 'Generated 27 Sept 2026, 09:00 UTC', 'Demo data.', 'Leads processed', '33.3%', '$0.08', 'Pending', 'Northwind Data', '98/100', 'PASS', 'Lena Hoffmann, Director of Sales Operations', 'Hi Lena,', 'Status: DRAFT, awaiting approval', 'Held for manual review (1)', 'Quietpeak', '67/100', 'HOLD', 'Why held', 'Missing data: hqCountry', 'Page 2 of 2']) {
+    for (const expected of [REPORT_TITLE, 'Generated 27 Sept 2026, 09:00 UTC', 'Demo data.', 'Leads processed', '33.3%', '$0.08', 'Pending', 'Northwind Data', '94/100', 'PASS', 'Lena Hoffmann, Director of Sales Operations', 'Hi Lena,', 'Status: DRAFT, awaiting approval', 'Held for manual review (1)', 'Quietpeak', '68/100', 'HOLD', 'Why held', 'Missing data: hqCountry', 'Page 2 of 2']) {
       assert.ok(text.includes(expected), `PDF text should include "${expected}"`);
     }
   });
 
-  it('keeps a 13-lead run to two pages', async () => {
+  it('keeps a 14-lead run to two pages, including a lead handed to sales', async () => {
     const path = join(tmp(), 'brief.pdf');
     const results = await run([...generateMockSignals().map(s => s.lead), ...generateMockCohort()]);
     const report = await writeExecutiveReport({ generatedAt: GENERATED_AT, dataSource: 'demo', results, experiment: null }, path, { compress: false });
     assert.equal(report.pages, 2);
     const text = pdfText(path);
-    assert.ok(text.includes('Top qualified prospects (2 of 11)'));
+    assert.ok(text.includes('Top qualified prospects (2 of 12)'));
+    assert.ok(text.includes('Next step'));
     assert.ok(text.includes('Page 2 of 2'));
   });
 

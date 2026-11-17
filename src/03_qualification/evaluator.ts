@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { mergedEnrichmentFields } from '../02_enrichment/index';
 import { ICP, type Icp } from '../shared/icp';
 import { QualificationSchema, type Lead, type Qualification, type Signal } from '../shared/types';
+import { freshSignalsByWarmth, signalRule, signalTypeOf } from '../shared/warmth';
 
 // ICP evaluation for leads that passed the hard gates.
 //
@@ -151,7 +152,7 @@ ${JSON.stringify(icp, null, 2)}
 
 How to score:
 - Apply the rubric points exactly. Industry in targetIndustries earns scoring.weights.industry. Headcount within companySize earns scoring.weights.companySize. hqCountry in targetCountries earns scoring.weights.country.
-- Intent: take the strongest fresh signal. Its points come from scoring.signalPoints (use 'default' for unlisted types), decayed linearly as points x (1 - ageDays / maxSignalAgeDays). Signals older than maxSignalAgeDays or with negative age earn 0. Round the total score to an integer.
+- Intent: take the strongest fresh signal. Its points come from scoring.signals[signalType].points (use 'default' for unlisted types), decayed linearly as points x (1 - ageDays / maxSignalAgeDays). Signals older than maxSignalAgeDays or with negative age earn 0. Round the total score to an integer.
 - Firmographics come only from verifiedEnrichment. Signal rawData is unverified and never proves industry, headcount or country.
 - Unknown values earn 0. List each unknown field from qualification.requiredFields in missingFields, using those exact names.
 - evidence: one short line per rubric component with the fact, the points awarded and the source in brackets, for example "Industry 'B2B SaaS' is a target industry (+30) [apollo]". Never invent facts, sources or signals.
@@ -167,7 +168,7 @@ export function buildLeadPrompt(lead: Lead, { asOfMs }: EvaluationContext): stri
     signals: lead.signals.map(signal => ({
       id: signal.id,
       source: signal.source,
-      signalType: typeof signal.rawData.signalType === 'string' ? signal.rawData.signalType : 'unknown',
+      signalType: signalTypeOf(signal),
       ageDays: Math.round(((asOfMs - signal.timestamp) / DAY_MS) * 10) / 10,
       rawData: signal.rawData,
     })),
@@ -260,19 +261,15 @@ export const mockScoreRubric: RubricScorer = async (lead, { asOfMs, icp }) => {
 // Signal points decay linearly to zero at maxSignalAgeDays; only the strongest counts.
 // Future-dated or stale signals earn nothing.
 function strongestFreshSignal(signals: Signal[], asOfMs: number, icp: Icp): { points: number; description: string } | null {
-  const { signalPoints, maxSignalAgeDays } = icp.scoring;
   let best: { points: number; description: string } | null = null;
-  for (const signal of signals) {
-    const ageDays = (asOfMs - signal.timestamp) / DAY_MS;
-    if (ageDays < 0 || ageDays > maxSignalAgeDays) continue;
-    const type = typeof signal.rawData.signalType === 'string' ? signal.rawData.signalType : 'unknown';
-    const base = signalPoints[type] ?? signalPoints.default ?? 0;
-    const points = Math.round(base * (1 - ageDays / maxSignalAgeDays) * 100) / 100;
+  for (const { signal, type, tier, tierName, ageDays } of freshSignalsByWarmth(signals, asOfMs, icp)) {
+    const base = signalRule(type, icp).points;
+    const points = Math.round(base * (1 - ageDays / icp.scoring.maxSignalAgeDays) * 100) / 100;
     if (!best || points > best.points) {
       const detail = typeof signal.rawData.jobTitle === 'string' ? ` for '${signal.rawData.jobTitle}'` : '';
       best = {
         points,
-        description: `Fresh ${type} signal${detail} via ${signal.source}, ${ageDays.toFixed(1)} days old (+${points.toFixed(1)} of ${base}) [${signal.id}]`,
+        description: `Fresh ${type} signal (tier ${tier}, ${tierName})${detail} via ${signal.source}, ${ageDays.toFixed(1)} days old (+${points.toFixed(1)} of ${base}) [${signal.id}]`,
       };
     }
   }

@@ -87,7 +87,8 @@ export const PersonSchema = z.strictObject({
 export type Person = z.infer<typeof PersonSchema>;
 
 export const ContactLookupStepSchema = z.strictObject({
-  step: z.enum(['person_search', 'email_finder']),
+  // 'signal': the person was named by a signal (a form fill, signup or LinkedIn engager).
+  step: z.enum(['signal', 'person_search', 'email_finder']),
   source: NonEmptyString,
   status: z.enum(['found', 'not_found', 'failed']),
   costInCents: z.number().int().nonnegative(),
@@ -179,7 +180,9 @@ export const CrmSyncSchema = z.strictObject({
 });
 export type CrmSync = z.infer<typeof CrmSyncSchema>;
 
-export const ActivationOutcomeSchema = z.enum(['suppressed', 'activated', 'manual_review', 'disqualified']);
+// routed_to_sales: a hand-raiser (e.g. a demo request) goes to sales directly, with no draft.
+// queued: qualified, but over the daily outreach limit; drafted on a later run.
+export const ActivationOutcomeSchema = z.enum(['suppressed', 'activated', 'routed_to_sales', 'queued', 'manual_review', 'disqualified']);
 export type ActivationOutcome = z.infer<typeof ActivationOutcomeSchema>;
 
 export const ActivationResultSchema = z
@@ -204,6 +207,15 @@ export const ActivationResultSchema = z
         if (!r.active) fail('must be active');
         if (!r.crm || !r.draft) fail('requires a CRM sync and a draft');
         if (!channels.includes('#hot-leads')) fail('requires a #hot-leads alert');
+        break;
+      case 'routed_to_sales':
+        if (!r.active) fail('must be active');
+        if (!r.crm || r.draft) fail('requires a CRM sync and no draft');
+        if (!channels.includes('#hot-leads')) fail('requires a #hot-leads alert');
+        break;
+      case 'queued':
+        if (!r.active) fail('must stay active');
+        if (r.crm || r.draft || r.alerts.length > 0) fail('must have no CRM sync, draft or alert yet');
         break;
       case 'manual_review':
         if (!r.active) fail('must stay active');

@@ -52,7 +52,7 @@ async function main(): Promise<void> {
     }
     console.log(`  status:    ${c.status}`);
     console.log(`  reason:    ${c.reason}`);
-    console.log(`  steps:     ${c.steps.map(s => `${s.source} [${s.status}, ${s.costInCents}¢]`).join(' -> ')}`);
+    console.log(`  steps:     ${c.steps.map(s => `${s.step === 'signal' ? `signal from ${s.source}` : s.source} [${s.status}, ${s.costInCents}¢]`).join(' -> ')}`);
     console.log(`  recipient: ${sendableEmail(result, at(180_000)()) ?? 'none (not sendable)'}\n`);
   }
   console.log(`contact lookup spend: ${spend}¢`);

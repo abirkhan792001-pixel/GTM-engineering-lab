@@ -25,4 +25,8 @@ export const mockEmailFinder: EmailFinderProvider = {
     if (!local) return { email: null, status: 'unknown' };
     return { email: `${local}@${companyDomain}`, status: MAIL_SERVER_STATUS[companyDomain] ?? 'valid' };
   },
+  async verify(email) {
+    const domain = email.split('@')[1]!.toLowerCase();
+    return { email, status: MAIL_SERVER_STATUS[domain] ?? 'valid' };
+  },
 };

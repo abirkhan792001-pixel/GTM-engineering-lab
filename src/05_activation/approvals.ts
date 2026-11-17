@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { sendableEmail } from '../04_contacts/index';
+import { ROUTING } from '../shared/routing';
 import type { EmailDraft, Lead } from '../shared/types';
 import type { CrmAdapter } from './adapters/mockCRM';
+import { compareForOutreach } from './priority';
 
 // Human approval before any email reaches a prospect.
 //
@@ -12,7 +14,14 @@ import type { CrmAdapter } from './adapters/mockCRM';
 //   - the recipient is still the verified contact, verified within the last 7 days
 //   - neither the recipient nor the account has been suppressed since the draft was made
 //   - the draft is still pending (so a double click can't send twice)
+//   - fewer than dailyOutreachLimit (routing.json) emails have gone out today (UTC)
 // Every transition is appended to the record's audit history.
+//
+// One draft per lead, and one lead per account, so an account gets one first touch. When a
+// new signal re-runs the lead, a still-pending draft is replaced with the new content (or
+// withdrawn if the lead no longer gets a draft, e.g. it was handed to sales). A draft that
+// was already sent, rejected or blocked is kept as it is. Pending drafts are listed warmest
+// first, in the same order as the batch planner (priority.ts).
 //
 // Records live in memory (bounded); a database-backed store can implement the same service.
 
@@ -21,7 +30,7 @@ export type DraftStatus = z.infer<typeof DraftStatusSchema>;
 
 export interface AuditEntry {
   at: number;
-  action: 'created' | 'approved' | 'sent' | 'send_failed' | 'rejected' | 'blocked';
+  action: 'created' | 'updated' | 'approved' | 'sent' | 'send_failed' | 'rejected' | 'blocked';
   by?: string;
   note?: string;
 }
@@ -63,7 +72,7 @@ export type RejectInput = z.infer<typeof RejectInputSchema>;
 
 export type ApprovalOutcome =
   | { ok: true; record: DraftRecord }
-  | { ok: false; code: 'not_found' | 'invalid' | 'conflict' | 'blocked' | 'send_failed'; message: string; record?: DraftRecord };
+  | { ok: false; code: 'not_found' | 'invalid' | 'conflict' | 'blocked' | 'send_failed' | 'limit_reached'; message: string; record?: DraftRecord };
 
 // One draft per lead, so the id is derivable wherever the lead id is known.
 export const draftIdFor = (leadId: string) => `draft_${leadId}`;
@@ -78,15 +87,29 @@ export interface ApprovalServiceOptions {
   crm: CrmAdapter;
   now?: () => number;
   maxRecords?: number;
+  // Most emails sent per UTC day; defaults to routing.json dailyOutreachLimit.
+  dailySendLimit?: number;
 }
 
-export function createApprovalService({ sender, crm, now = Date.now, maxRecords = 1000 }: ApprovalServiceOptions) {
+const DAY_MS = 86_400_000;
+const utcDay = (ms: number) => Math.floor(ms / DAY_MS);
+
+export function createApprovalService({ sender, crm, now = Date.now, maxRecords = 1000, dailySendLimit = ROUTING.dailyOutreachLimit }: ApprovalServiceOptions) {
   const records = new Map<string, DraftRecord>();
 
   function register(lead: Lead, draft: EmailDraft): DraftRecord {
     const id = draftIdFor(lead.id);
     const existing = records.get(id);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.status !== 'pending_approval') return existing;
+      const contentHash = draftContentHash(draft);
+      if (contentHash !== existing.contentHash) {
+        Object.assign(existing, { draft, contentHash });
+        existing.history.push({ at: now(), action: 'updated', note: 'Re-drafted after the lead was re-run' });
+      }
+      existing.lead = lead;
+      return existing;
+    }
     const at = now();
     const record: DraftRecord = {
       id,
@@ -101,6 +124,16 @@ export function createApprovalService({ sender, crm, now = Date.now, maxRecords 
     };
     records.set(id, record);
     if (records.size > maxRecords) records.delete(records.keys().next().value!);
+    return record;
+  }
+
+  // Blocks a still-pending draft when a re-run of the lead no longer drafts (e.g. it was handed to sales).
+  function withdraw(leadId: string, note: string): DraftRecord | undefined {
+    const record = records.get(draftIdFor(leadId));
+    if (record && (record.status === 'pending_approval' || record.status === 'send_failed')) {
+      record.status = 'blocked';
+      record.history.push({ at: now(), action: 'blocked', by: 'pipeline', note });
+    }
     return record;
   }
 
@@ -127,13 +160,19 @@ export function createApprovalService({ sender, crm, now = Date.now, maxRecords 
       return { ok: false, code: 'invalid', message: `This draft has ${record.draft.reviewNotes.length} review note(s); set acknowledgeReviewNotes: true after reading them`, record };
     }
 
+    // In-flight sends count too, so concurrent approvals can't overshoot the limit.
+    const at = now();
+    const usedToday = [...records.values()].filter(r => r.status === 'sending' || (r.sent && utcDay(r.sent.at) === utcDay(at))).length;
+    if (usedToday >= dailySendLimit) {
+      return { ok: false, code: 'limit_reached', message: `Daily outreach limit of ${dailySendLimit} emails reached (UTC day); approve again tomorrow`, record };
+    }
+
     // Claim the draft before the first await, so a concurrent approval sees 'sending' and
     // gets a conflict instead of passing the same checks and sending a second time.
     const previousStatus = record.status;
     record.status = 'sending';
 
     // Send-time checks, fail-closed.
-    const at = now();
     const to = sendableEmail(record.lead, at);
     if (!to || to !== record.draft.to) {
       return block(record, approvedBy, record.draft.to ? `Recipient ${record.draft.to} is no longer verified (older than 7 days); re-run the lead` : 'Draft has no verified recipient');
@@ -179,10 +218,15 @@ export function createApprovalService({ sender, crm, now = Date.now, maxRecords 
 
   return {
     register,
+    withdraw,
     approve,
     reject,
     get: (id: string) => records.get(id),
-    list: (status?: DraftStatus) => [...records.values()].filter(r => !status || r.status === status),
+    // Warmest first: the order a reviewer should work through them.
+    list: (status?: DraftStatus) => {
+      const asOfMs = now();
+      return [...records.values()].filter(r => !status || r.status === status).sort((a, b) => compareForOutreach(a.lead, b.lead, { asOfMs }));
+    },
   };
 }
 

@@ -8,11 +8,11 @@ default; set `MOCK_MODE=false` to switch on live Claude, Firecrawl, Slack and Re
 
 | Stage | What happens | Result |
 |---|---|---|
-| 1. Signals | Collect intent signals (hiring posts, pricing-page visits) | One lead per account |
+| 1. Signals | Collect intent signals (demo requests, signups, LinkedIn engagement, hiring posts) and merge them by company domain | One lead per account, carrying every signal |
 | 2. Enrichment | Apollo first (1¢); Firecrawl (5¢) only if data is still missing | Verified company data and cost |
-| 3. Qualification | Dealbreaker rules, then Claude scores against the ICP | Pass, hold or disqualify, with evidence |
-| 4. Contacts | For passing leads only: find the buyer, then find and verify their email | A verified recipient, or the reason there isn't one |
-| 5. Activation | Suppression check, then CRM record, email draft and Slack alert; a person approves each draft before it's sent | Drafts sent to verified contacts only after approval |
+| 3. Qualification | Dealbreaker rules, then Claude scores against the ICP; intent points follow the signal's warmth tier | Pass, hold or disqualify, with evidence |
+| 4. Contacts | For passing leads only: the person a signal names comes first, else find the buyer; then verify their email | A verified recipient, or the reason there isn't one |
+| 5. Activation | Suppression check; demo requests go straight to sales; the rest are ranked warmest first under a daily limit, then get a CRM record, email draft and Slack alert; a person approves each draft before it's sent | Drafts sent to verified contacts only after approval |
 | 6. Learning | A/B test the email angle, track replies and meetings | Winning variant |
 
 ## Project structure
@@ -45,22 +45,57 @@ Requires Node.js 22+.
 ```sh
 npm install
 npm test              # all tests, offline
-npm run pipeline:run  # full pipeline on 3 mock leads
+npm run pipeline:run  # full pipeline on 4 mock leads
 ```
 
 | Command | Shows |
 |---|---|
-| `npm run signals:dev` | The 3 mock leads |
+| `npm run signals:dev` | The 4 mock leads |
 | `npm run enrich:dev` | Enrichment path and cost per lead |
 | `npm run qualify:dev` | Decision, score and evidence |
 | `npm run contacts:dev` | Who gets emailed, and why not when no one does |
 | `npm run activate:dev` | What happens for each decision |
+| `npm run pipeline:run` | Every stage per lead, in priority order |
 | `npm run learn:dev` | A/B results across 10 leads |
 | `npm run qualify:live` | Real Claude scoring (needs an API key) |
 | `npm run server:dev` | Webhook server on port 3000 (see below) |
 | `npm run report:pdf` | Full pipeline plus a PDF executive brief in `reports/` |
 
 Everything runs offline on mock data unless you set `MOCK_MODE=false` or run `qualify:live`.
+
+## Warmth tiers: who gets the first message
+
+Every signal type has a warmth tier in `icp.json` (`scoring.signals`). The warmest fresh signal
+(30 days by default) decides three things: how many intent points a lead earns, who is
+addressed, and who goes first.
+
+| Tier | Meaning | Signal types | Points |
+|---|---|---|---|
+| 5 | Hand-raise: first-party data only you have | `demo-request`, `contact-form`, `signup` | 28-30 |
+| 4 | Engagement | `linkedin-own-post-engagement`, `pricing-page-visit`, `linkedin-profile-view`, `linkedin-company-follow`, `linkedin-competitor-post-engagement` | 18-24 |
+| 3 | Trigger event | `hiring` | 15 |
+| 2 | Fit (lookalikes, tech stack) | none yet | |
+| 1 | Data only | anything unlisted (`default`) | 5 |
+
+The config fails to load if a colder tier ever earns more points than a warmer one.
+
+- **One lead per account.** Signals for the same domain are merged onto one lead. An exact
+  repeat (same source, time and payload) is dropped, and the merged lead re-runs the pipeline.
+- **The named person first.** When a fresh signal names someone (a form fill, a signup, a
+  LinkedIn engager), 04_contacts addresses them as long as their title matches a persona. It
+  verifies the email they gave if it's on the company's domain. Otherwise it falls back to the
+  usual buyer search and records why.
+- **Hand-raisers skip outreach.** A qualified lead with a fresh signal listed in
+  `routing.json` (`routeToSalesSignals`, by default `demo-request`) is `routed_to_sales`: it
+  gets a CRM record and a `#hot-leads` alert telling a rep to reply personally, and no
+  sequence draft.
+- **Warmest first, under a daily limit.** In a batch (`processBatch`), the other qualified
+  leads are ranked by tier, then ICP score, then signal recency. The top
+  `dailyOutreachLimit` (default 5) get drafts and the rest are `queued` with their rank. The
+  webhook server lists pending drafts in the same order and sends at most that many emails
+  per UTC day.
+- **Signals decide who, not what to say.** Website visits and LinkedIn engagement are never
+  mentioned to the prospect. A draft's one observation comes only from a public job posting.
 
 ## Claude scoring
 
@@ -99,9 +134,23 @@ curl -X POST localhost:3000/api/webhooks/signal \
 curl localhost:3000/api/leads/<leadId>   # decision, contact, outcome and log
 ```
 
-`eventType` is one of `contact_form`, `demo_request`, `signup`, `pricing_page_visit` or
-`hiring`. Send `companyDomain`, or an `email` on the company's domain. Set `WEBHOOK_SECRET`
-in live mode; callers then send it in the `x-webhook-secret` header.
+`eventType` is one of `contact_form`, `demo_request`, `signup`, `pricing_page_visit`,
+`linkedin_engagement` or `hiring`. Send `companyDomain`, or an `email` on the company's
+domain. `linkedin_engagement` also needs `engagement`: `own_post`, `competitor_post`,
+`profile_view` or `company_follow`. Optional `name`, `title` and `linkedinUrl` say who it
+was, so that person can be addressed. Set `WEBHOOK_SECRET` in live mode; callers then send
+it in the `x-webhook-secret` header.
+
+```sh
+curl -X POST localhost:3000/api/webhooks/signal -H 'content-type: application/json' \
+  -d '{"eventType":"linkedin_engagement","engagement":"own_post","source":"linkedin","companyDomain":"northwind-data.example","name":"Lena Hoffmann","title":"Director of Sales Operations"}'
+# 202 {"status":"merged","signalCount":2,"leadId":"lead_northwind-data_…",…}
+```
+
+A signal for a company the server already knows answers `"status":"merged"` with the same
+`leadId` and re-runs the lead. An exact repeat answers `200` with `"status":"duplicate"` and
+runs nothing. A lead is never run twice at once: a signal that arrives mid-run queues one
+more run. Leads, like drafts, are kept in memory.
 
 ## Approving drafts
 
@@ -113,6 +162,13 @@ in an approval queue. Approving it sends it, after these checks run again at sen
 - the recipient is still verified, within the last 7 days
 - neither the recipient nor the account has been suppressed since the draft was made
 - it hasn't been sent, rejected or blocked already, so it can't go out twice
+- fewer than `dailyOutreachLimit` emails have gone out today (UTC); otherwise approval
+  answers `429` and the draft stays pending for tomorrow
+
+There is one draft per lead, so one per account. When a new signal re-runs a lead, a pending
+draft is replaced with the new content, which has a new `contentHash`. If the lead no longer
+gets a draft (say a demo request handed it to sales), the pending draft is blocked. A draft
+that was already sent is never replaced. Pending drafts are listed warmest first.
 
 ```sh
 curl localhost:3000/api/drafts?status=pending_approval -H "authorization: Bearer $APPROVAL_TOKEN"
@@ -132,7 +188,7 @@ memory, so pending drafts are lost when the server restarts.
 `npm run report:pdf` runs the pipeline and writes `reports/gtm-brief-procuros.pdf`: headline
 metrics (leads processed, pass rate, enrichment cost, winning A/B variant), an outcome table for
 every lead, and profiles of the top qualified prospects with their score, evidence, verified
-buyer and outreach draft. Leads held for manual review get a shorter profile: score, why they
+buyer and outreach draft (or, for a lead handed to sales or queued, its next step). Leads held for manual review get a shorter profile: score, why they
 were held, any missing data and the evidence. Pass `--out <path>` to write elsewhere.
 
 The brief stays at 1-2 pages by profiling two leads: the highest-scoring qualified prospects
@@ -143,7 +199,9 @@ there is engagement data behind it. The layout code is in `src/shared/pdfReporte
 
 Edit the files in `src/context/` to fit your market:
 
-- `icp.json`: target industries, company size, countries, dealbreakers and scoring
+- `icp.json`: target industries, company size, countries, dealbreakers and scoring,
+  including each signal type's warmth tier and points
+- `routing.json`: which signals go straight to sales, and the daily outreach limit
 - `personas.json`: buyer titles and pain points
 - `voice.md`: tone and email rules, which drafts are checked against
 
