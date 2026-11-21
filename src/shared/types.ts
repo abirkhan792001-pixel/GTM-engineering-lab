@@ -83,6 +83,9 @@ export const PersonSchema = z.strictObject({
   title: NonEmptyString,
   // The persona (from personas.json) whose target titles this person matched.
   personaId: NonEmptyString,
+  // Other ways to reach them, when the source knew them: LinkedIn steps and call tasks need these.
+  linkedinUrl: z.url().optional(),
+  phone: z.string().regex(/^\+[0-9][0-9 -]{6,19}$/, 'Expected an E.164-style number like +1 555 0100').optional(),
 });
 export type Person = z.infer<typeof PersonSchema>;
 
@@ -144,6 +147,10 @@ export const EmailDraftSchema = z.strictObject({
   // Safeguard: a draft can only ever be a DRAFT awaiting human approval.
   status: z.literal('DRAFT'),
   requiresApproval: z.literal(true),
+  // first_touch opens the sequence; follow_up answers new engagement after an earlier touch.
+  touch: z.enum(['first_touch', 'follow_up']),
+  // 1 for the first touch, then one more per email already sent to the account.
+  touchNumber: z.number().int().min(1),
   // The verified contact's email from 04_contacts; null when there is no sendable recipient.
   to: z.email().nullable(),
   persona: NonEmptyString,
@@ -180,9 +187,64 @@ export const CrmSyncSchema = z.strictObject({
 });
 export type CrmSync = z.infer<typeof CrmSyncSchema>;
 
+// ---------------------------------------------------------------------------
+// Allbound: channels, ad audiences and the CRM touch log
+// ---------------------------------------------------------------------------
+
+export const ChannelSchema = z.enum(['email', 'linkedin', 'call']);
+export type Channel = z.infer<typeof ChannelSchema>;
+
+export const AdPlatformSchema = z.enum(['linkedin', 'google', 'meta']);
+export type AdPlatform = z.infer<typeof AdPlatformSchema>;
+
+// One step of the sequence for this contact. 'skipped' steps say why (e.g. no verified email).
+export const ChannelStepSchema = z.strictObject({
+  day: z.number().int().nonnegative(),
+  channel: ChannelSchema,
+  action: NonEmptyString,
+  status: z.enum(['planned', 'skipped']),
+  // Where the step goes: the email address, LinkedIn URL or phone number; null when skipped.
+  target: NonEmptyString.nullable(),
+  reason: NonEmptyString,
+});
+export type ChannelStep = z.infer<typeof ChannelStepSchema>;
+
+export const AudienceMembershipSchema = z.strictObject({
+  platform: AdPlatformSchema,
+  // icp-accounts: every activated account. engager-retargeting: accounts that engaged after a touch.
+  audience: z.enum(['icp-accounts', 'engager-retargeting']),
+  // LinkedIn matches companies by domain; Google and Meta match people by verified email.
+  match: z.enum(['company', 'email']),
+  status: z.enum(['added', 'already_member', 'skipped', 'failed']),
+  detail: NonEmptyString,
+});
+export type AudienceMembership = z.infer<typeof AudienceMembershipSchema>;
+
+// The same people on every channel at once: sequence steps plus ad audiences.
+export const ChannelPlanSchema = z.strictObject({
+  mode: z.enum(['first_touch', 'follow_up']),
+  steps: z.array(ChannelStepSchema),
+  audiences: z.array(AudienceMembershipSchema),
+});
+export type ChannelPlan = z.infer<typeof ChannelPlanSchema>;
+
+// One entry in an account's CRM timeline. Inbound touches are engagement signals; outbound
+// touches are what we did (an email sent, an ad audience joined). Ids make logging idempotent.
+export const TouchSchema = z.strictObject({
+  id: NonEmptyString,
+  companyDomain: CompanyDomainSchema,
+  at: EpochMs,
+  direction: z.enum(['inbound', 'outbound']),
+  channel: z.enum(['email', 'linkedin', 'call', 'ads', 'web', 'sales']),
+  kind: NonEmptyString,
+  detail: NonEmptyString,
+});
+export type Touch = z.infer<typeof TouchSchema>;
+
 // routed_to_sales: a hand-raiser (e.g. a demo request) goes to sales directly, with no draft.
 // queued: qualified, but over the daily outreach limit; drafted on a later run.
-export const ActivationOutcomeSchema = z.enum(['suppressed', 'activated', 'routed_to_sales', 'queued', 'manual_review', 'disqualified']);
+// in_sequence: already emailed and nothing new since; waits for engagement before a follow-up.
+export const ActivationOutcomeSchema = z.enum(['suppressed', 'activated', 'routed_to_sales', 'queued', 'in_sequence', 'manual_review', 'disqualified']);
 export type ActivationOutcome = z.infer<typeof ActivationOutcomeSchema>;
 
 export const ActivationResultSchema = z
@@ -194,6 +256,8 @@ export const ActivationResultSchema = z
     reason: NonEmptyString,
     crm: CrmSyncSchema.nullable(),
     draft: EmailDraftSchema.nullable(),
+    // Activated leads only: the sequence steps and ad audiences for this account.
+    channels: ChannelPlanSchema.nullable(),
     alerts: z.array(SlackAlertSchema),
     log: z.array(NonEmptyString),
     activatedAt: EpochMs,
@@ -205,13 +269,17 @@ export const ActivationResultSchema = z
     switch (r.outcome) {
       case 'activated':
         if (!r.active) fail('must be active');
-        if (!r.crm || !r.draft) fail('requires a CRM sync and a draft');
+        if (!r.crm || !r.draft || !r.channels) fail('requires a CRM sync, a draft and a channel plan');
         if (!channels.includes('#hot-leads')) fail('requires a #hot-leads alert');
         break;
       case 'routed_to_sales':
         if (!r.active) fail('must be active');
         if (!r.crm || r.draft) fail('requires a CRM sync and no draft');
         if (!channels.includes('#hot-leads')) fail('requires a #hot-leads alert');
+        break;
+      case 'in_sequence':
+        if (!r.active) fail('must stay active');
+        if (!r.crm || r.draft || r.alerts.length > 0) fail('requires a CRM sync, and no draft or alert');
         break;
       case 'queued':
         if (!r.active) fail('must stay active');
@@ -228,5 +296,6 @@ export const ActivationResultSchema = z
         if (r.crm || r.draft || r.alerts.length > 0) fail('must have no CRM sync, draft or alert');
         break;
     }
+    if (r.outcome !== 'activated' && r.channels) fail('only activated leads carry a channel plan');
   });
 export type ActivationResult = z.infer<typeof ActivationResultSchema>;

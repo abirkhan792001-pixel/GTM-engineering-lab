@@ -18,10 +18,21 @@ import { VOICE, type VoiceGuidelines } from '../../shared/voice';
 //
 // A/B test: the subject line and the relevance sentence come from the variant that
 // 06_learning assigns to the lead; experimentId and variantId are stamped on the draft.
+//
+// Follow-ups (touch: 'follow_up') answer new engagement after an earlier email. They are
+// shorter (voice.md's follow-up limit), refer only to our earlier note, and never say what
+// the prospect did: a post like or a profile view is a reason to write, not something to quote.
+
+export interface DraftContext {
+  // Reference time for checking that the recipient's verification is fresh.
+  asOfMs?: number;
+  touch?: EmailDraft['touch'];
+  // 1 for the first touch; a follow-up after one sent email is touch 2, and so on.
+  touchNumber?: number;
+}
 
 export interface EmailAdapter {
-  // asOfMs is the reference time for checking that the recipient's verification is fresh.
-  generateDraft(lead: Lead, context?: { asOfMs?: number }): Promise<EmailDraft>;
+  generateDraft(lead: Lead, context?: DraftContext): Promise<EmailDraft>;
 }
 
 export interface EmailOptions {
@@ -66,7 +77,7 @@ function quotableSignal(lead: Lead, asOfMs: number): { jobTitle: string; evidenc
 const words = (text: string) => text.split(/\s+/).filter(Boolean);
 const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
 
-function lint(subject: string, body: string, voice: VoiceGuidelines): EmailDraft['checks'] {
+function lint(subject: string, body: string, voice: VoiceGuidelines, maxWords: number): EmailDraft['checks'] {
   const bodyWords = words(body).length;
   const sentences = body.split(/(?<=[.?!])\s+|\n+/).map(s => s.trim()).filter(Boolean);
   const longSentences = sentences.filter(s => words(s).length > voice.sentenceMaxWords);
@@ -75,7 +86,7 @@ function lint(subject: string, body: string, voice: VoiceGuidelines): EmailDraft
   const questions = (body.match(/\?/g) ?? []).length;
   const placeholders = `${subject}\n${body}`.match(/\{\{[^}]*\}\}|\[[^\]]*\]/g) ?? [];
   return [
-    { name: 'word-limit', passed: bodyWords <= voice.firstTouchMaxWords, detail: `${bodyWords}/${voice.firstTouchMaxWords} words` },
+    { name: 'word-limit', passed: bodyWords <= maxWords, detail: `${bodyWords}/${maxWords} words` },
     { name: 'subject-length', passed: words(subject).length <= voice.subjectMaxWords, detail: `${words(subject).length}/${voice.subjectMaxWords} words` },
     {
       name: 'sentence-length',
@@ -107,6 +118,11 @@ export function createMockEmail(options: EmailOptions = {}): EmailAdapter {
       const contactPersona = personas.find(p => p.id === lead.contact?.person?.personaId);
       const persona = contactPersona ?? selectPersona(headcount, personas);
       const asOfMs = context.asOfMs ?? Date.now();
+      const touch = context.touch ?? 'first_touch';
+      const touchNumber = context.touchNumber ?? 1;
+      if ((touch === 'first_touch') !== (touchNumber === 1)) {
+        throw new Error(`A ${touch} draft can't be touch ${touchNumber}: the first touch is touch 1 and follow-ups come after it`);
+      }
       const to = sendableEmail(lead, asOfMs);
       const company = companyName(lead);
       const quotable = quotableSignal(lead, asOfMs);
@@ -114,10 +130,13 @@ export function createMockEmail(options: EmailOptions = {}): EmailAdapter {
       const reviewNotes: string[] = [];
       const evidenceUsed: string[] = [];
 
-      // 1. One observation, only from a public signal that is safe to quote.
+      // 1. One observation, only from a public signal that is safe to quote. A follow-up
+      //    points back to our earlier email instead.
       const jobTitle = quotable?.jobTitle ?? null;
       let observation: string;
-      if (quotable) {
+      if (touch === 'follow_up') {
+        observation = 'Following up on my earlier email.';
+      } else if (quotable) {
         observation = `I saw ${company} is hiring a ${quotable.jobTitle}.`;
         evidenceUsed.push(quotable.evidenceLine);
       } else {
@@ -129,7 +148,9 @@ export function createMockEmail(options: EmailOptions = {}): EmailAdapter {
       // Subject from the assigned variant; fall back to a neutral subject if a template field is unknown.
       const renderedSubject = renderTemplate(variant.subjectLineTemplate, { jobTitle: jobTitle?.toLowerCase(), company: company.toLowerCase() });
       let subject = renderedSubject.text;
-      if (renderedSubject.missing.length) {
+      if (touch === 'follow_up') {
+        subject = `following up, ${company.toLowerCase()}`;
+      } else if (renderedSubject.missing.length) {
         subject = `lead qualification at ${company.toLowerCase()}`;
         reviewNotes.push(`Variant subject needed ${renderedSubject.missing.join(', ')}; used the neutral fallback subject.`);
       }
@@ -145,9 +166,11 @@ export function createMockEmail(options: EmailOptions = {}): EmailAdapter {
       // 3. Offer, 4. one ask, sign-off.
       const firstName = to ? safeText(lead.contact?.person?.fullName.split(/\s+/)[0]) : null;
       const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
-      const body = [greeting, observation, `${relevance}`, offer, cta, `Best,\n${senderName}`].join('\n\n');
+      // A follow-up restates the offer first, so the angle that follows has something to refer to.
+      const paragraphs = touch === 'follow_up' ? [greeting, observation, offer, relevance, cta] : [greeting, observation, relevance, offer, cta];
+      const body = [...paragraphs, `Best,\n${senderName}`].join('\n\n');
 
-      const checks = lint(subject, body, voice);
+      const checks = lint(subject, body, voice, touch === 'follow_up' ? voice.followUpMaxWords : voice.firstTouchMaxWords);
       for (const check of checks) if (!check.passed) reviewNotes.push(`Voice check '${check.name}' failed: ${check.detail}`);
       const gap = recipientGap(lead, asOfMs);
       if (gap) reviewNotes.push(`No sendable recipient: ${gap}`);
@@ -155,6 +178,8 @@ export function createMockEmail(options: EmailOptions = {}): EmailAdapter {
       return EmailDraftSchema.parse({
         status: 'DRAFT',
         requiresApproval: true,
+        touch,
+        touchNumber,
         to,
         persona: persona.id,
         experimentId: experiment.id,

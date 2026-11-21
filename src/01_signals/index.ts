@@ -4,6 +4,8 @@ import { LeadSchema, type Lead } from '../shared/types';
 
 export { IntakeError, INTENT_EVENT_TYPES, IntentSignalSchema, intentToLead, LINKEDIN_ENGAGEMENTS, normalizeDomain, type IntentSignal } from './intake';
 export { mergeByDomain, mergeLead } from './merge';
+export { SourcedAccountSchema, sourceAccounts, type AccountListProvider, type SourcedAccount, type SourceReport, type SourcingResult } from './sourcing';
+export { MOCK_ACCOUNT_LISTS } from './providers/mockAccountLists';
 
 // Mock signal generator. Emits four synthetic leads that exercise the paths the
 // later stages must handle: a strong fit, an edge case with missing firmographics,
@@ -55,7 +57,12 @@ function mockLeads(asOfMs: number): MockLead[] {
             id: 'sig_northwind_linkedin_003',
             source: 'linkedin',
             timestamp: asOfMs - 12 * HOUR_MS,
-            rawData: { signalType: 'linkedin-own-post-engagement', contactName: 'Lena Hoffmann', contactTitle: 'Director of Sales Operations' },
+            rawData: {
+              signalType: 'linkedin-own-post-engagement',
+              contactName: 'Lena Hoffmann',
+              contactTitle: 'Director of Sales Operations',
+              contactLinkedinUrl: 'https://linkedin.example/in/lena-hoffmann',
+            },
           },
         ],
         enrichment: [],

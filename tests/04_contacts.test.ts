@@ -4,6 +4,7 @@ import { generateMockCohort, generateMockSignals } from '../src/01_signals/index
 import { enrichLead } from '../src/02_enrichment/index';
 import { qualifyLead } from '../src/03_qualification/index';
 import {
+  DEFAULT_EMAIL_WATERFALL,
   lookupContact,
   MAX_VERIFICATION_AGE_DAYS,
   recipientGap,
@@ -70,7 +71,7 @@ describe('04 contacts: lookup on the mock leads', () => {
     const lead = await lookupContact(await qualifiedMock(0), { now });
     const c = lead.contact!;
     assert.equal(c.status, 'verified');
-    assert.deepEqual(c.person, { fullName: 'Lena Hoffmann', title: 'Director of Sales Operations', personaId: 'revops-leader' });
+    assert.deepEqual(c.person, { fullName: 'Lena Hoffmann', title: 'Director of Sales Operations', personaId: 'revops-leader', linkedinUrl: 'https://linkedin.example/in/lena-hoffmann' });
     assert.equal(c.email, 'lena.hoffmann@northwind-data.example');
     assert.equal(c.verifiedAt, NOW);
     assert.deepEqual(c.steps.map(s => [s.step, s.source]), [['signal', 'linkedin'], ['email_finder', 'email-finder']]);
@@ -254,5 +255,85 @@ describe('04 contacts: sendable recipients and schema rules', () => {
     assert.ok(!ContactSchema.safeParse(verifiedContact({ status: 'unverified', person: null })).success, 'unverified without person');
     assert.ok(!ContactSchema.safeParse(verifiedContact({ status: 'not_found' })).success, 'not_found carrying a person');
     assert.ok(!ContactSchema.safeParse(verifiedContact({ steps: [] })).success, 'no steps');
+  });
+});
+
+describe('04 contacts: email waterfall', () => {
+  const buyer = people([{ fullName: 'Lena Hoffmann', title: 'RevOps Manager' }]);
+  const named = (name: string, result: Parameters<typeof finder>[0], costInCents = 2): EmailFinderProvider => ({ ...finder(result), name, costInCents });
+
+  it('stops at the first provider with a valid address', async () => {
+    const third = verifyingFinder();
+    const lead = await lookupContact(passLead(), {
+      peopleSearch: buyer,
+      emailFinders: [named('first', { email: null, status: 'unknown' }), named('second', { email: 'lena@test.example', status: 'valid' }, 3), third],
+      now,
+    });
+    assert.equal(lead.contact!.status, 'verified');
+    assert.equal(lead.contact!.email, 'lena@test.example');
+    assert.deepEqual(lead.contact!.steps.slice(1).map(s => [s.source, s.status, s.costInCents]), [['first', 'not_found', 2], ['second', 'found', 3]]);
+    assert.deepEqual(third.calls, [], 'never asked once an address verified');
+    assert.equal(totalContactCostInCents(lead), 1 + 2 + 3);
+  });
+
+  it('moves past catch-all results and provider errors', async () => {
+    const lead = await lookupContact(passLead(), {
+      peopleSearch: buyer,
+      emailFinders: [named('catchall', { email: 'lena@test.example', status: 'catch_all' }), named('broken', () => { throw new Error('down'); }), named('good', { email: 'l.hoffmann@test.example', status: 'valid' })],
+      now,
+    });
+    assert.equal(lead.contact!.email, 'l.hoffmann@test.example');
+    assert.deepEqual(lead.contact!.steps.slice(1).map(s => s.status), ['found', 'failed', 'found']);
+  });
+
+  it('keeps the first unverifiable address for review when nothing verifies', async () => {
+    const lead = await lookupContact(passLead(), {
+      peopleSearch: buyer,
+      emailFinders: [named('a', { email: null, status: 'unknown' }), named('b', { email: 'lena@test.example', status: 'catch_all' }), named('c', { email: 'other@test.example', status: 'invalid' })],
+      now,
+    });
+    assert.deepEqual([lead.contact!.status, lead.contact!.email, lead.contact!.emailStatus], ['unverified', 'lena@test.example', 'catch_all']);
+    assert.equal(lead.contact!.steps.length, 4, 'every provider was tried');
+  });
+
+  it('falls back to the finders when a known address does not verify', async () => {
+    const bounced: EmailFinderProvider = { ...verifyingFinder(), verify: async email => ({ email, status: 'invalid' }) };
+    const lead = await lookupContact(namedLead({ contactName: 'Mia Chen', contactTitle: 'CEO', contactEmail: 'mia@test.example' }), { emailFinders: [bounced], now });
+    assert.equal(lead.contact!.email, 'guessed@test.example');
+    assert.deepEqual(lead.contact!.steps.filter(s => s.step === 'email_finder').length, 2, 'one verify, one find');
+  });
+
+  it('defaults to a two-provider waterfall that finds quillstack.example through the backup', async () => {
+    assert.deepEqual(DEFAULT_EMAIL_WATERFALL.map(f => f.name), ['email-finder', 'backup-email-finder']);
+    const lead = await lookupContact(passLead({ companyDomain: 'quillstack.example' }), { now });
+    assert.equal(lead.contact!.email, 'sofia@quillstack.example');
+    assert.deepEqual(lead.contact!.steps.map(s => `${s.source}:${s.status}`), ['apollo-people:found', 'email-finder:not_found', 'backup-email-finder:found']);
+    assert.equal(lead.contact!.person!.personaId, 'demand-gen-leader', 'VP Marketing matched the fallback persona');
+  });
+});
+
+describe('04 contacts: LinkedIn and phone', () => {
+  it('carries the LinkedIn URL and phone from the people search onto the person', async () => {
+    const roster = people([{ fullName: 'Hannah Vogel', title: 'Chief Revenue Officer', linkedinUrl: 'https://linkedin.example/in/hannah-vogel', phone: '+1 555 0142' }]);
+    const lead = await lookupContact(passLead(), { peopleSearch: roster, emailFinder: finder({ email: 'h@test.example', status: 'valid' }), now });
+    assert.deepEqual(lead.contact!.person, { fullName: 'Hannah Vogel', title: 'Chief Revenue Officer', personaId: 'revenue-leader', linkedinUrl: 'https://linkedin.example/in/hannah-vogel', phone: '+1 555 0142' });
+  });
+
+  it('takes the LinkedIn URL from an engagement signal', async () => {
+    const lead = await lookupContact(namedLead({ contactName: 'Mia Chen', contactTitle: 'CEO', contactLinkedinUrl: 'https://linkedin.example/in/mia-chen' }), { emailFinder: verifyingFinder(), now });
+    assert.equal(lead.contact!.person!.linkedinUrl, 'https://linkedin.example/in/mia-chen');
+  });
+
+  it('says LinkedIn steps only when no email verifies but the profile is known', async () => {
+    const lead = await lookupContact(passLead({ companyDomain: 'tallowworks.example' }), { now });
+    assert.equal(lead.contact!.status, 'unverified');
+    assert.match(lead.contact!.reason, /catch_all.*LinkedIn steps only/);
+    assert.equal(lead.contact!.person!.linkedinUrl, 'https://linkedin.example/in/owen-pike');
+  });
+
+  it('rejects a malformed phone number or LinkedIn URL on the contact', () => {
+    const person = { fullName: 'A B', title: 'CEO', personaId: 'growth-founder' };
+    assert.ok(!ContactSchema.safeParse(verifiedContact({ person: { ...person, phone: '555-CALL-NOW' } })).success);
+    assert.ok(!ContactSchema.safeParse(verifiedContact({ person: { ...person, linkedinUrl: 'not a url' } })).success);
   });
 });

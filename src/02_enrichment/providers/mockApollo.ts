@@ -1,4 +1,4 @@
-import { LEARNING_COHORT } from '../../shared/mockCompanies';
+import { LEARNING_COHORT, SOURCED_ACCOUNTS } from '../../shared/mockCompanies';
 import type { EnrichmentProvider } from './types';
 
 // Simulates a fast firmographic database lookup: basic headcount, industry and HQ
@@ -10,7 +10,7 @@ const DATABASE: Record<string, { headcount: number; industry: string; hqCountry:
   'ravenhill.example': { headcount: 90, industry: 'Developer Tools', hqCountry: 'GB' },
   // quietpeak.example is intentionally absent: a young company the database has not indexed.
 
-  ...Object.fromEntries(LEARNING_COHORT.map(c => [c.domain, { headcount: c.headcount, industry: c.industry, hqCountry: c.hqCountry }])),
+  ...Object.fromEntries([...LEARNING_COHORT, ...SOURCED_ACCOUNTS].map(c => [c.domain, { headcount: c.headcount, industry: c.industry, hqCountry: c.hqCountry }])),
 };
 
 export const mockApollo: EnrichmentProvider = {

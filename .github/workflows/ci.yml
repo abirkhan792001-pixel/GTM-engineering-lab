@@ -43,6 +43,7 @@ jobs:
           npm run contacts:dev
           npm run activate:dev
           npm run pipeline:run
+          npm run allbound:dev
           npm run learn:dev
           npm run report:pdf
           test -s reports/gtm-brief-procuros.pdf

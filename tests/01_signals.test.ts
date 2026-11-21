@@ -2,7 +2,20 @@ import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { afterEach, describe, it } from 'node:test';
-import { generateMockCohort, generateMockSignals, IntakeError, IntentSignalSchema, intentToLead, mergeByDomain, mergeLead, MOCK_AS_OF_MS, normalizeDomain } from '../src/01_signals/index';
+import {
+  generateMockCohort,
+  generateMockSignals,
+  IntakeError,
+  IntentSignalSchema,
+  intentToLead,
+  MOCK_ACCOUNT_LISTS,
+  mergeByDomain,
+  mergeLead,
+  MOCK_AS_OF_MS,
+  normalizeDomain,
+  sourceAccounts,
+  type AccountListProvider,
+} from '../src/01_signals/index';
 import { createSignalServer } from '../src/01_signals/server';
 import { createApprovalService, createMockSender } from '../src/05_activation/index';
 import type { PipelineResult } from '../src/runPipeline';
@@ -410,6 +423,47 @@ describe('01 signals: draft approval endpoints', () => {
     assert.equal(sender.outbox.length, 0);
   });
 
+  it('follows up on engagement after an approved email and shows the account timeline', async () => {
+    await start();
+    const first = await pendingDraft();
+    await postJson(`/api/drafts/${first.id}/approve`, { approvedBy: 'Abir', contentHash: first.contentHash, acknowledgeReviewNotes: true });
+
+    // Lena likes a founder post: the same lead re-runs and gets a follow-up, not a second first touch.
+    const engaged = await postJson('/api/webhooks/signal', {
+      eventType: 'linkedin_engagement',
+      engagement: 'own_post',
+      source: 'linkedin',
+      companyDomain: 'northwind-data.example',
+      name: 'Lena Hoffmann',
+      title: 'Director of Sales Operations',
+    });
+    let job: Record<string, any> = {};
+    for (let i = 0; i < 100 && job.status !== 'done'; i++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      job = (await getJson(`/api/leads/${engaged.body.leadId}`)).body;
+    }
+    assert.equal(job.result.outcome, 'activated');
+    assert.equal(job.result.draftId, `${first.id}_touch2`);
+    const followUp = (await getJson(`/api/drafts/${job.result.draftId}`)).body;
+    assert.equal(followUp.status, 'pending_approval');
+    assert.match(followUp.subject, /^following up, northwind/);
+
+    const timeline = (await getJson('/api/accounts/northwind-data.example/timeline')).body;
+    const kinds = timeline.touches.map((t: { kind: string }) => t.kind);
+    assert.ok(kinds.includes('first-touch-email') && kinds.includes('linkedin-own-post-engagement') && kinds.includes('retargeting-audience'), kinds.join(', '));
+    assert.equal(timeline.attribution, null, 'no meeting yet');
+  });
+
+  it('closes the account timeline in live mode without the approval token', async () => {
+    await start({ mode: 'live' });
+    assert.equal((await getJson('/api/accounts/acme.example/timeline')).status, 503);
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await start({ mode: 'live', token: TOKEN });
+    assert.equal((await getJson('/api/accounts/acme.example/timeline')).status, 401);
+    const ok = await getJson('/api/accounts/acme.example/timeline', TOKEN);
+    assert.deepEqual([ok.status, ok.body.touches], [200, []]);
+  });
+
   it('rejects a draft through the API', async () => {
     await start();
     const draft = await pendingDraft();
@@ -434,5 +488,78 @@ describe('01 signals: draft approval endpoints', () => {
     const res = await getJson('/api/drafts');
     assert.equal(res.status, 503);
     assert.match(res.body.error, /set APPROVAL_TOKEN/);
+  });
+});
+
+describe('01 signals: account list sourcing', () => {
+  const now = MOCK_AS_OF_MS;
+  const list = (name: string, records: unknown[] | (() => never), costPerRecordInCents = 1): AccountListProvider => ({
+    name,
+    costPerRecordInCents,
+    fetchAccounts: async () => (typeof records === 'function' ? records() : records),
+  });
+
+  it('dedupes accounts across providers into one lead each, keeping every listing as a signal', async () => {
+    const result = await sourceAccounts(
+      [
+        list('blitzapi', [{ website: 'acme.example', companyName: 'Acme' }, { website: 'beta.example' }]),
+        list('sales-navigator', [{ website: 'https://www.Acme.example/about' }], 2),
+      ],
+      { now },
+    );
+    assert.deepEqual(result.leads.map(l => [l.id, l.companyDomain, l.signals.map(s => s.source)]), [
+      ['lead_acme', 'acme.example', ['blitzapi', 'sales-navigator']],
+      ['lead_beta', 'beta.example', ['blitzapi']],
+    ]);
+    assert.equal(result.duplicates, 1);
+    assert.deepEqual(result.leads[0]!.signals[0]!.rawData, { signalType: 'account-list', companyName: 'Acme' });
+    assert.deepEqual(result.sources.map(s => [s.source, s.fetched, s.costInCents]), [['blitzapi', 2, 2], ['sales-navigator', 1, 2]]);
+    assert.ok(result.leads.every(l => l.enrichment.length === 0 && l.qualification === null), 'list data never counts as enrichment');
+  });
+
+  it('rejects records without a usable domain, and counts a provider listing an account twice once', async () => {
+    const result = await sourceAccounts([list('prospeo', [{ website: 'not a website' }, { companyName: 'No site' }, 'junk', { website: 'acme.example' }, { website: 'ACME.example' }])], { now });
+    assert.equal(result.sources[0]!.rejected, 3);
+    assert.equal(result.leads.length, 1);
+    assert.equal(result.leads[0]!.signals.length, 1);
+  });
+
+  it('reports a failing provider and keeps the others', async () => {
+    const result = await sourceAccounts([list('ai-ark', () => { throw new Error('rate limited'); }), list('ocean-io', [{ website: 'acme.example' }])], { now });
+    assert.deepEqual(result.sources.map(s => [s.source, s.status, s.error ?? null]), [['ai-ark', 'failed', 'rate limited'], ['ocean-io', 'ok', null]]);
+    assert.equal(result.leads.length, 1);
+  });
+
+  it('merges a later engagement onto the sourced lead', async () => {
+    const [sourced] = (await sourceAccounts([list('blitzapi', [{ website: 'acme.example' }])], { now })).leads;
+    const engaged = intentToLead(IntentSignalSchema.parse({ eventType: 'ad_click', adPlatform: 'linkedin', source: 'fibbler', companyDomain: 'acme.example' }), { now: now + 1, id: () => 'x' });
+    assert.deepEqual(mergeLead(sourced!, engaged)!.signals.map(s => s.rawData.signalType), ['account-list', 'ad-click']);
+  });
+
+  it('sources the five mock lists down to five accounts', async () => {
+    const result = await sourceAccounts(MOCK_ACCOUNT_LISTS, { now });
+    assert.deepEqual(result.sources.map(s => s.source), ['blitzapi', 'sales-navigator', 'prospeo', 'ai-ark', 'ocean-io']);
+    assert.deepEqual(result.leads.map(l => l.companyDomain), ['quillstack.example', 'tallowworks.example', 'cobaltpay.example', 'orchardops.example', 'vervepath.example']);
+    assert.equal(result.duplicates, 6);
+  });
+});
+
+describe('01 signals: replies, ad clicks and meetings', () => {
+  const now = MOCK_AS_OF_MS;
+  const id = () => 'abc123';
+  const parse = (event: Record<string, unknown>) => intentToLead(IntentSignalSchema.parse({ source: 'x', companyDomain: 'acme.example', ...event }), { now, id }).signals[0]!.rawData;
+
+  it('maps each new event type to its signal type', () => {
+    assert.equal(parse({ eventType: 'email_reply' }).signalType, 'email-reply');
+    assert.equal(parse({ eventType: 'linkedin_reply' }).signalType, 'linkedin-reply');
+    assert.equal(parse({ eventType: 'meeting_booked' }).signalType, 'meeting-booked');
+    assert.deepEqual(parse({ eventType: 'ad_click', adPlatform: 'meta' }), { signalType: 'ad-click', adPlatform: 'meta' });
+  });
+
+  it('requires adPlatform for ad_click, and only there', () => {
+    const base = { source: 'fibbler', companyDomain: 'acme.example' };
+    assert.ok(!IntentSignalSchema.safeParse({ ...base, eventType: 'ad_click' }).success, 'missing platform');
+    assert.ok(!IntentSignalSchema.safeParse({ ...base, eventType: 'ad_click', adPlatform: 'tiktok' }).success, 'unknown platform');
+    assert.ok(!IntentSignalSchema.safeParse({ ...base, eventType: 'signup', adPlatform: 'google' }).success, 'platform on another event');
   });
 });

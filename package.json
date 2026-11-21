@@ -16,6 +16,7 @@
     "contacts:dev": "tsx src/04_contacts/run.ts",
     "activate:dev": "tsx src/05_activation/run.ts",
     "pipeline:run": "tsx src/runPipeline.ts",
+    "allbound:dev": "tsx src/runAllbound.ts",
     "learn:dev": "tsx src/06_learning/run.ts",
     "server:dev": "tsx src/01_signals/server.ts",
     "report:pdf": "tsx src/runPipeline.ts --export-pdf"

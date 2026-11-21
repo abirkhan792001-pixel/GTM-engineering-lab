@@ -15,13 +15,15 @@ import { compareForOutreach } from './priority';
 //   - neither the recipient nor the account has been suppressed since the draft was made
 //   - the draft is still pending (so a double click can't send twice)
 //   - fewer than dailyOutreachLimit (routing.json) emails have gone out today (UTC)
-// Every transition is appended to the record's audit history.
+// Every transition is appended to the record's audit history, and a sent email is logged on
+// the account's CRM timeline as an outbound touch (for follow-ups and attribution).
 //
-// One draft per lead, and one lead per account, so an account gets one first touch. When a
-// new signal re-runs the lead, a still-pending draft is replaced with the new content (or
-// withdrawn if the lead no longer gets a draft, e.g. it was handed to sales). A draft that
-// was already sent, rejected or blocked is kept as it is. Pending drafts are listed warmest
-// first, in the same order as the batch planner (priority.ts).
+// One draft per lead and touch, and one lead per account, so an account gets one first touch,
+// then one follow-up per later touch. When a new signal re-runs the lead, a still-pending
+// draft for the same touch is replaced with the new content (or withdrawn if the lead no
+// longer gets a draft, e.g. it was handed to sales). A draft that was already sent, rejected
+// or blocked is kept as it is. Pending drafts are listed warmest first, in the same order as
+// the batch planner (priority.ts).
 //
 // Records live in memory (bounded); a database-backed store can implement the same service.
 
@@ -74,8 +76,8 @@ export type ApprovalOutcome =
   | { ok: true; record: DraftRecord }
   | { ok: false; code: 'not_found' | 'invalid' | 'conflict' | 'blocked' | 'send_failed' | 'limit_reached'; message: string; record?: DraftRecord };
 
-// One draft per lead, so the id is derivable wherever the lead id is known.
-export const draftIdFor = (leadId: string) => `draft_${leadId}`;
+// One draft per lead and touch, so the id is derivable wherever the lead id is known.
+export const draftIdFor = (leadId: string, touchNumber = 1) => (touchNumber === 1 ? `draft_${leadId}` : `draft_${leadId}_touch${touchNumber}`);
 
 // Hash of what the prospect would receive: recipient, subject and body.
 export function draftContentHash(draft: EmailDraft): string {
@@ -98,7 +100,7 @@ export function createApprovalService({ sender, crm, now = Date.now, maxRecords 
   const records = new Map<string, DraftRecord>();
 
   function register(lead: Lead, draft: EmailDraft): DraftRecord {
-    const id = draftIdFor(lead.id);
+    const id = draftIdFor(lead.id, draft.touchNumber);
     const existing = records.get(id);
     if (existing) {
       if (existing.status !== 'pending_approval') return existing;
@@ -127,14 +129,17 @@ export function createApprovalService({ sender, crm, now = Date.now, maxRecords 
     return record;
   }
 
-  // Blocks a still-pending draft when a re-run of the lead no longer drafts (e.g. it was handed to sales).
+  // Blocks the lead's still-pending drafts when a re-run no longer drafts (e.g. it was handed
+  // to sales). Returns the lead's latest draft, if it has any.
   function withdraw(leadId: string, note: string): DraftRecord | undefined {
-    const record = records.get(draftIdFor(leadId));
-    if (record && (record.status === 'pending_approval' || record.status === 'send_failed')) {
-      record.status = 'blocked';
-      record.history.push({ at: now(), action: 'blocked', by: 'pipeline', note });
+    const mine = [...records.values()].filter(r => r.leadId === leadId);
+    for (const record of mine) {
+      if (record.status === 'pending_approval' || record.status === 'send_failed') {
+        record.status = 'blocked';
+        record.history.push({ at: now(), action: 'blocked', by: 'pipeline', note });
+      }
     }
-    return record;
+    return mine.sort((a, b) => b.draft.touchNumber - a.draft.touchNumber)[0];
   }
 
   const block = (record: DraftRecord, by: string, note: string): ApprovalOutcome => {
@@ -193,9 +198,22 @@ export function createApprovalService({ sender, crm, now = Date.now, maxRecords 
       .catch(error => ({ status: 'failed' as const, error: error instanceof Error ? error.message : String(error) }));
 
     if (result.status === 'sent') {
+      const sentAt = now();
       record.status = 'sent';
-      record.sent = { provider: sender.name, messageId: result.messageId, to, at: now() };
-      record.history.push({ at: now(), action: 'sent', by: approvedBy, note: `via ${sender.name}${result.messageId ? ` (${result.messageId})` : ''}` });
+      record.sent = { provider: sender.name, messageId: result.messageId, to, at: sentAt };
+      // The email went out either way; a CRM outage only costs the timeline entry, and says so.
+      const logged = await crm
+        .logTouch({
+          id: `touch_${record.id}_sent`,
+          companyDomain: record.companyDomain,
+          at: sentAt,
+          direction: 'outbound',
+          channel: 'email',
+          kind: record.draft.touch === 'follow_up' ? 'follow-up-email' : 'first-touch-email',
+          detail: `"${record.draft.subject}" to ${to}`,
+        })
+        .then(() => '', error => `; CRM touch not logged: ${error instanceof Error ? error.message : String(error)}`);
+      record.history.push({ at: sentAt, action: 'sent', by: approvedBy, note: `via ${sender.name}${result.messageId ? ` (${result.messageId})` : ''}${logged}` });
       return { ok: true, record };
     }
     record.status = 'send_failed';

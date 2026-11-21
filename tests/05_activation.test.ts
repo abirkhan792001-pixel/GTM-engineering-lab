@@ -5,6 +5,7 @@ import {
   activateLead,
   createApprovalService,
   createLiveResend,
+  createMockAudiences,
   createLiveSlack,
   createMockCRM,
   createMockEmail,
@@ -13,7 +14,13 @@ import {
   createResendSender,
   draftContentHash,
   draftIdFor,
+  hashForAudience,
+  planAudiences,
   planOutreach,
+  planSteps,
+  selectPostsToPromote,
+  touchForSignal,
+  type FounderPost,
   type DraftRecord,
   type ProspectSender,
   reviewEmailText,
@@ -21,7 +28,9 @@ import {
 } from '../src/05_activation/index';
 import { assignVariant } from '../src/06_learning/index';
 import { processBatch, processLead } from '../src/runPipeline';
-import { ActivationResultSchema, EmailDraftSchema, type Lead } from '../src/shared/types';
+import { ChannelsConfigSchema, CHANNELS } from '../src/shared/channels';
+import { ICP, IcpSchema } from '../src/shared/icp';
+import { ActivationResultSchema, EmailDraftSchema, type Lead, type Touch } from '../src/shared/types';
 import { parseVoiceGuidelines, VOICE, VOICE_MARKDOWN } from '../src/shared/voice';
 import { CLOCKS, DAY_MS, fakeFetch, freshAdapters, makeLead, NOW, OFFLINE, passQualification, signal, verifiedContact } from './helpers';
 
@@ -135,7 +144,7 @@ describe('05 activation: hand-raisers and the daily outreach limit', () => {
   });
 
   it('enforces the new outcome invariants in the schema', () => {
-    const base = { leadId: 'l', companyDomain: 'a.example', active: true, reason: 'r', crm: null, draft: null, alerts: [], log: [], activatedAt: NOW };
+    const base = { leadId: 'l', companyDomain: 'a.example', active: true, reason: 'r', crm: null, draft: null, channels: null, alerts: [], log: [], activatedAt: NOW };
     assert.ok(!ActivationResultSchema.safeParse({ ...base, outcome: 'routed_to_sales' }).success, 'sales handoff without CRM or alert');
     assert.ok(ActivationResultSchema.safeParse({ ...base, outcome: 'queued' }).success);
     assert.ok(!ActivationResultSchema.safeParse({ ...base, outcome: 'queued', active: false }).success, 'queued must stay active');
@@ -633,5 +642,231 @@ describe('05 activation: draft approval before sending', () => {
     assert.ok(text.includes(`Draft id: ${draftIdFor(lead.id)}`));
     assert.ok(text.includes(`Content hash: ${draftContentHash(draft)}`));
     assert.ok(text.includes('POST /api/drafts/<draft id>/approve'));
+  });
+});
+
+describe('05 activation: channel plan', () => {
+  const person = { fullName: 'Hannah Vogel', title: 'Chief Revenue Officer', personaId: 'revenue-leader' };
+  const reachable = passLead({ contact: verifiedContact({ person: { ...person, linkedinUrl: 'https://linkedin.example/in/hannah', phone: '+1 555 0142' } }) });
+
+  it('plans every first-touch step when the contact can be reached on each channel', () => {
+    const steps = planSteps(reachable, 'first_touch', NOW);
+    assert.deepEqual(steps.map(s => [s.day, s.channel, s.status]), [[0, 'email', 'planned'], [1, 'linkedin', 'planned'], [3, 'call', 'planned'], [4, 'linkedin', 'planned'], [7, 'email', 'planned']]);
+    assert.deepEqual(steps.map(s => s.target), ['lena.hoffmann@test.example', 'https://linkedin.example/in/hannah', '+1 555 0142', 'https://linkedin.example/in/hannah', 'lena.hoffmann@test.example']);
+  });
+
+  it('runs LinkedIn steps only when no email verifies, and skips calls without a phone', () => {
+    const lead = passLead({
+      contact: verifiedContact({ status: 'unverified', emailStatus: 'catch_all', verifiedAt: null, person: { ...person, linkedinUrl: 'https://linkedin.example/in/hannah' }, reason: 'catch-all' }),
+    });
+    const steps = planSteps(lead, 'first_touch', NOW);
+    assert.deepEqual(steps.filter(s => s.status === 'planned').map(s => s.channel), ['linkedin', 'linkedin']);
+    assert.match(steps[0]!.reason, /No verified email \(catch_all\)/);
+    assert.match(steps[2]!.reason, /No phone number/);
+  });
+
+  it('skips every step when no contact was found, saying why', () => {
+    const lead = passLead({ contact: { status: 'not_found', person: null, email: null, emailStatus: null, verifiedAt: null, steps: [{ step: 'person_search', source: 'p', status: 'not_found', costInCents: 1 }], reason: 'No buyer found' } });
+    assert.ok(planSteps(lead, 'first_touch', NOW).every(s => s.status === 'skipped' && s.reason === 'No buyer found'));
+  });
+
+  it('matches LinkedIn by company and Google/Meta by verified email; retargeting only on follow-up', () => {
+    const first = planAudiences(reachable, 'first_touch', NOW);
+    assert.deepEqual(first.map(a => [a.platform, a.audience, a.match, a.value]), [
+      ['linkedin', 'icp-accounts', 'company', 'test.example'],
+      ['google', 'icp-accounts', 'email', 'lena.hoffmann@test.example'],
+      ['meta', 'icp-accounts', 'email', 'lena.hoffmann@test.example'],
+    ]);
+    assert.deepEqual([...new Set(planAudiences(reachable, 'follow_up', NOW).map(a => a.audience))], ['icp-accounts', 'engager-retargeting']);
+    const noEmail = planAudiences(passLead(), 'first_touch', NOW);
+    assert.deepEqual(noEmail.map(a => a.skipReason), [null, 'No verified email to match on', 'No verified email to match on']);
+  });
+
+  it('activates with a plan, joins the ad audiences and logs each join on the CRM timeline', async () => {
+    const adapters = freshAdapters();
+    const result = await activate(reachable, adapters);
+    assert.equal(result.channels!.mode, 'first_touch');
+    assert.deepEqual(result.channels!.audiences.map(a => a.status), ['added', 'added', 'added']);
+    assert.ok(adapters.audiences.members.get('google:icp-accounts')!.has(hashForAudience('Lena.Hoffmann@test.example')), 'emails are stored hashed');
+    const timeline = await adapters.crm.timeline('test.example');
+    assert.deepEqual(timeline.map(t => [t.direction, t.channel, t.kind]), [['outbound', 'ads', 'icp-audience'], ['outbound', 'ads', 'icp-audience'], ['outbound', 'ads', 'icp-audience']]);
+    assert.match(result.alerts[0]!.text, /\*Sequence:\* day 0 first-touch-email, day 1 connection-request, day 3 call/);
+    const again = await activate(reachable, adapters);
+    assert.deepEqual(again.channels!.audiences.map(a => a.status), ['already_member', 'already_member', 'already_member']);
+    assert.equal((await adapters.crm.timeline('test.example')).length, 3, 'no duplicate touches');
+  });
+
+  it('reports a failed audience upload without failing activation', async () => {
+    const audiences = { name: 'down', add: async (): Promise<never> => { throw new Error('token expired'); } };
+    const result = await activateLead(reachable, { ...freshAdapters(), audiences, now: () => NOW });
+    assert.equal(result.outcome, 'activated');
+    assert.ok(result.channels!.audiences.every(a => a.status === 'failed' && /token expired/.test(a.detail)));
+  });
+
+  it('only activated leads carry a channel plan', () => {
+    const plan = { mode: 'first_touch', steps: [], audiences: [] };
+    const base = { leadId: 'l', companyDomain: 'a.example', active: true, reason: 'r', crm: null, draft: null, alerts: [], log: [], activatedAt: NOW };
+    assert.ok(!ActivationResultSchema.safeParse({ ...base, outcome: 'queued', channels: plan }).success);
+    const crm = { action: 'created', companyRecordId: 'c', contactRecordId: null, dealId: 'd', url: 'https://crm.mock.example/c' };
+    assert.ok(ActivationResultSchema.safeParse({ ...base, outcome: 'in_sequence', crm, channels: null }).success);
+    assert.ok(!ActivationResultSchema.safeParse({ ...base, outcome: 'in_sequence', crm: null, channels: null }).success, 'in_sequence needs the CRM sync');
+  });
+});
+
+describe('05 activation: follow-up after engagement', () => {
+  const emailed = (at: number): Touch => ({ id: 'touch_sent_1', companyDomain: 'test.example', at, direction: 'outbound', channel: 'email', kind: 'first-touch-email', detail: 'sent' });
+  const engagement = (ageDays: number, rawData: Record<string, unknown> = { signalType: 'linkedin-own-post-engagement', contactName: 'Lena Hoffmann' }) =>
+    signal({ id: `sig_engaged_${ageDays}`, source: 'linkedin', ageDays, rawData });
+
+  it('drafts a follow-up and adds retargeting when someone engages after our email', async () => {
+    const adapters = freshAdapters();
+    await adapters.crm.logTouch(emailed(NOW - 3 * DAY_MS));
+    const lead = passLead({ contact: verifiedContact(), signals: [signal({ ageDays: 5 }), engagement(1)] });
+    const result = await activate(lead, adapters);
+    assert.equal(result.outcome, 'activated');
+    assert.deepEqual([result.draft!.touch, result.draft!.touchNumber], ['follow_up', 2]);
+    assert.equal(result.channels!.mode, 'follow_up');
+    assert.ok(result.channels!.audiences.some(a => a.audience === 'engager-retargeting' && a.status === 'added'));
+    assert.match(result.reason, /Engaged after 1 email\(s\)/);
+    assert.ok(result.log.some(l => l.startsWith('Follow-up: linkedin-own-post-engagement [sig_engaged_1]')));
+    const kinds = (await adapters.crm.timeline('test.example')).map(t => t.kind);
+    assert.ok(kinds.includes('linkedin-own-post-engagement') && kinds.includes('retargeting-audience'));
+  });
+
+  it('waits in sequence when nothing new happened since the last email', async () => {
+    const adapters = freshAdapters();
+    await adapters.crm.logTouch(emailed(NOW - 1 * DAY_MS));
+    const lead = passLead({ contact: verifiedContact(), signals: [signal({ ageDays: 5 }), engagement(2)] });
+    const result = await activate(lead, adapters);
+    assert.deepEqual([result.outcome, result.draft, result.channels, result.alerts], ['in_sequence', null, null, []]);
+    assert.match(result.reason, /Already emailed 1 time\(s\).*no new engagement/);
+  });
+
+  it('never quotes the engagement in the follow-up and keeps it under the follow-up word limit', async () => {
+    const adapters = freshAdapters();
+    await adapters.crm.logTouch(emailed(NOW - 3 * DAY_MS));
+    const draft = (await activate(passLead({ contact: verifiedContact(), signals: [engagement(1)] }), adapters)).draft!;
+    assert.doesNotMatch(draft.body, /\b(linkedin|post|liked|viewed|profile|ad|clicked)\b/i);
+    assert.match(draft.body, /^Hi Lena,\n\nFollowing up on my earlier email\./);
+    const words = draft.checks.find(c => c.name === 'word-limit')!;
+    assert.ok(words.passed && words.detail.endsWith(`/${VOICE.followUpMaxWords} words`), words.detail);
+  });
+
+  it('refuses a draft whose touch kind and number disagree', async () => {
+    const email = createMockEmail();
+    await assert.rejects(email.generateDraft(passLead(), { touch: 'follow_up', touchNumber: 1 }), /follow_up draft can't be touch 1/);
+    await assert.rejects(email.generateDraft(passLead(), { touch: 'first_touch', touchNumber: 2 }));
+  });
+
+  it('routes a booked meeting to sales and logs which touches led to it', async () => {
+    const adapters = freshAdapters();
+    await adapters.crm.logTouch(emailed(NOW - 4 * DAY_MS));
+    const meeting = signal({ id: 'sig_meeting', source: 'calendar', ageDays: 0, rawData: { signalType: 'meeting-booked' } });
+    const result = await activate(passLead({ contact: verifiedContact(), signals: [engagement(2), meeting] }), adapters);
+    assert.equal(result.outcome, 'routed_to_sales');
+    const line = result.log.find(l => l.startsWith('Attribution:'));
+    assert.match(line!, /2 touch\(es\) over 4 day\(s\); first first-touch-email \(email\), last linkedin-own-post-engagement \(linkedin\); we reached them by email 1; they engaged by linkedin 1/);
+  });
+
+  it('only engagement signals become timeline touches', () => {
+    const lead = passLead();
+    assert.equal(touchForSignal(lead, signal()), null, 'a hiring post is research, not engagement');
+    assert.equal(touchForSignal(lead, signal({ rawData: { signalType: 'account-list' } })), null);
+    assert.deepEqual(touchForSignal(lead, signal({ id: 's1', rawData: { signalType: 'ad-click', adPlatform: 'google' } })), {
+      id: 'touch_s1',
+      companyDomain: 'test.example',
+      at: NOW - DAY_MS,
+      direction: 'inbound',
+      channel: 'ads',
+      kind: 'ad-click',
+      detail: 'ad-click on google via job-board',
+    });
+  });
+
+  it('hands email and LinkedIn replies to sales', async () => {
+    for (const type of ['email-reply', 'linkedin-reply']) {
+      const result = await activate(passLead({ contact: verifiedContact(), signals: [signal({ ageDays: 0, rawData: { signalType: type } })] }));
+      assert.equal(result.outcome, 'routed_to_sales', type);
+    }
+  });
+});
+
+describe('05 activation: approvals across touches', () => {
+  it('keeps a follow-up as its own draft, logs each send on the CRM timeline, and withdraws all pending drafts', async () => {
+    const adapters = freshAdapters();
+    const sender = createMockSender();
+    let clock = NOW;
+    const approvals = createApprovalService({ sender, crm: adapters.crm, now: () => clock });
+    const lead = passLead({ contact: verifiedContact() });
+
+    const first = approvals.register(lead, (await activate(lead, adapters)).draft!);
+    clock = NOW + 60_000;
+    assert.equal((await approvals.approve(first.id, { approvedBy: 'Abir', contentHash: first.contentHash, acknowledgeReviewNotes: true })).ok, true);
+    const sent = (await adapters.crm.timeline('test.example')).filter(t => t.channel === 'email');
+    assert.deepEqual(sent.map(t => [t.kind, t.at]), [['first-touch-email', NOW + 60_000]]);
+
+    const engaged = { ...lead, signals: [...lead.signals, signal({ id: 'sig_view', source: 'linkedin', ageDays: -1 / 24, rawData: { signalType: 'linkedin-profile-view' } })] };
+    const result = await activateLead(engaged, { ...adapters, now: () => NOW + 2 * 3_600_000 });
+    const followUp = approvals.register(engaged, result.draft!);
+    assert.equal(followUp.id, draftIdFor(lead.id, 2));
+    assert.notEqual(followUp.id, first.id);
+    assert.equal(followUp.status, 'pending_approval');
+
+    approvals.withdraw(lead.id, 'Superseded: the lead is now routed_to_sales');
+    assert.deepEqual([approvals.get(first.id)!.status, approvals.get(followUp.id)!.status], ['sent', 'blocked']);
+  });
+
+  it('still sends when the CRM touch log fails, and says so in the history', async () => {
+    const crm = { ...createMockCRM(), logTouch: async () => { throw new Error('CRM down'); } };
+    const approvals = createApprovalService({ sender: createMockSender(), crm, now: () => NOW });
+    const lead = passLead({ contact: verifiedContact() });
+    const record = approvals.register(lead, (await activate(lead)).draft!);
+    const outcome = await approvals.approve(record.id, { approvedBy: 'Abir', contentHash: record.contentHash, acknowledgeReviewNotes: true });
+    assert.equal(outcome.ok, true);
+    assert.match(String(record.history.at(-1)!.note), /CRM touch not logged: CRM down/);
+  });
+});
+
+describe('05 activation: founder posts to run as ads', () => {
+  const post = (id: string, daysAgo: number, impressions: number, engagements: number): FounderPost => ({
+    id, author: 'Founder', publishedAt: NOW - daysAgo * DAY_MS, impressions, reactions: engagements, comments: 0, reposts: 0,
+  });
+
+  it('promotes the highest engagement rates and says why every other post is held', () => {
+    const { promote, hold } = selectPostsToPromote([post('a', 1, 1000, 30), post('b', 2, 1000, 50), post('c', 3, 1000, 40), post('d', 1, 100, 50), post('e', 20, 5000, 500), post('f', 1, 1000, 10)], NOW);
+    assert.deepEqual(promote.map(d => [d.post.id, d.engagementRatePct]), [['b', 5], ['c', 4]]);
+    assert.deepEqual(Object.fromEntries(hold.map(d => [d.post.id, d.reason])), {
+      d: '100 impressions; needs 500 before the rate means anything',
+      e: 'Published 20 day(s) ago; only posts from the last 14 days run as ads',
+      f: 'Engagement rate 1% is under 2%',
+      a: 'Engagement rate 3% on 1000 impressions; over the limit of 2 promoted posts',
+    });
+  });
+
+  it('promotes nothing from an empty week', () => {
+    assert.deepEqual(selectPostsToPromote([], NOW), { promote: [], hold: [] });
+  });
+});
+
+describe('05 activation: allbound config', () => {
+  it('requires each sequence to open with a day-0 email, in day order', () => {
+    assert.ok(ChannelsConfigSchema.safeParse(CHANNELS).success);
+    assert.ok(!ChannelsConfigSchema.safeParse({ ...CHANNELS, firstTouch: [{ day: 1, channel: 'linkedin', action: 'connection-request' }] }).success);
+    assert.ok(!ChannelsConfigSchema.safeParse({ ...CHANNELS, followUp: [{ day: 0, channel: 'email', action: 'a' }, { day: 3, channel: 'call', action: 'b' }, { day: 1, channel: 'linkedin', action: 'c' }] }).success);
+  });
+
+  it('keeps the warmth ladder with the new signal types', () => {
+    const icp = ICP;
+    assert.deepEqual(['account-list', 'ad-click', 'email-reply', 'linkedin-reply', 'meeting-booked'].map(t => icp.scoring.signals[t]!.tier), [2, 4, 5, 5, 5]);
+    const broken = structuredClone(icp);
+    broken.scoring.signals['ad-click'] = { tier: 4, points: 10 };
+    assert.ok(!IcpSchema.safeParse(broken).success, 'a tier-4 signal may not earn less than tier-3 hiring');
+  });
+
+  it('stores audience members idempotently, emails hashed', async () => {
+    const audiences = createMockAudiences();
+    assert.equal(await audiences.add({ platform: 'meta', audience: 'icp-accounts', match: 'email', value: 'A@B.example' }), 'added');
+    assert.equal(await audiences.add({ platform: 'meta', audience: 'icp-accounts', match: 'email', value: ' a@b.example ' }), 'already_member');
+    assert.deepEqual([...audiences.members.get('meta:icp-accounts')!], [hashForAudience('a@b.example')]);
   });
 });

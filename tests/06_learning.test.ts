@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { generateMockCohort } from '../src/01_signals/index';
 import {
+  attributeConversion,
+  describeAttribution,
   assignVariant,
   createEventStore,
   FIRST_TOUCH_EXPERIMENT,
@@ -10,7 +12,8 @@ import {
   type EngagementEventType,
 } from '../src/06_learning/index';
 import { processLead } from '../src/runPipeline';
-import { CLOCKS, freshAdapters, idsByVariant, OFFLINE } from './helpers';
+import type { Touch } from '../src/shared/types';
+import { CLOCKS, DAY_MS, freshAdapters, idsByVariant, NOW, OFFLINE } from './helpers';
 
 const TS = '2026-09-27T10:00:00.000Z';
 const event = (leadId: string, eventType: EngagementEventType, timestamp = TS) => ({
@@ -155,5 +158,32 @@ describe('06 learning: metrics and winner selection', () => {
     const lowFloor = createEventStore({ ...FIRST_TOUCH_EXPERIMENT, minSendsPerVariant: 1 });
     send(lowFloor, [A[0]!, B[0]!]);
     assert.equal(lowFloor.getExperimentMetrics().enoughData, true);
+  });
+});
+
+describe('06 learning: meeting attribution', () => {
+  const touch = (id: string, daysAgo: number, direction: Touch['direction'], channel: Touch['channel'], kind: string): Touch => ({
+    id, companyDomain: 'acme.example', at: NOW - daysAgo * DAY_MS, direction, channel, kind, detail: kind,
+  });
+  const timeline = [
+    touch('t3', 3, 'outbound', 'email', 'first-touch-email'),
+    touch('t1', 6, 'outbound', 'ads', 'icp-audience'),
+    touch('t4', 1, 'inbound', 'linkedin', 'linkedin-own-post-engagement'),
+    touch('t5', 0, 'inbound', 'sales', 'meeting-booked'),
+    touch('t6', -2, 'inbound', 'ads', 'ad-click'),
+  ];
+
+  it('lists the touches before the meeting, oldest first, split by who made them', () => {
+    const a = attributeConversion(timeline, NOW);
+    assert.deepEqual(a.touches.map(t => t.id), ['t1', 't3', 't4'], 'the meeting itself and later touches are left out');
+    assert.deepEqual([a.firstTouch!.id, a.lastTouch!.id, a.daysFromFirstTouch], ['t1', 't4', 6]);
+    assert.deepEqual(a.byChannel, { outbound: { ads: 1, email: 1 }, inbound: { linkedin: 1 } });
+    assert.equal(describeAttribution(a), 'Attribution: 3 touch(es) over 6 day(s); first icp-audience (ads), last linkedin-own-post-engagement (linkedin); we reached them by ads 1, email 1; they engaged by linkedin 1');
+  });
+
+  it('says so when nothing was logged before the meeting', () => {
+    const a = attributeConversion([touch('t5', 0, 'inbound', 'sales', 'meeting-booked')], NOW);
+    assert.deepEqual([a.touches, a.firstTouch, a.daysFromFirstTouch], [[], null, null]);
+    assert.equal(describeAttribution(a), 'Attribution: no touches logged before the meeting');
   });
 });

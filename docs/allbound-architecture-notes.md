@@ -20,42 +20,44 @@ and sales can't run as separate funnels.
 
 ## How our pipeline maps
 
-| Layer | Our equivalent | Status |
+Status as of the allbound build (`npm run allbound:dev` runs all five layers offline).
+
+| Layer | Where it lives | Status |
 |---|---|---|
-| 1 Source | `01_signals`: mock signals and the webhook intake (`intake.ts`), with `normalizeDomain()` | **Partial.** We take intent signals one at a time. There's no list sourcing from databases, and no dedupe across signals: two webhooks for the same domain create two leads (`server.ts` mints a new lead id per signal). |
-| 2 Qualify: ICP | `03_qualification`: dealbreaker rules, then Claude scores with evidence; failures and gaps are held | **Done.** Same pattern as theirs: the agent gives reasons, code makes the call, and no fit means hold. |
-| 2 Qualify: persona | `04_contacts` `pickBuyer()` tries the persona sized for the account, then the others | **Done in shape.** Our personas are RevOps and founders. Theirs are Demand Gen, VP Marketing and CRO, which is a change to `personas.json`, not to code. |
-| 2 Qualify: email | `04_contacts`: one email finder plus verification | **Partial.** It's a single provider, not a waterfall, and without a verified email we stop. They fall back to a LinkedIn-only sequence. |
-| 3 Channels | `05_activation`: one email draft per lead, approved by a human before sending | **Email only.** No ads audiences, LinkedIn steps, calls or content-to-ads loop. |
-| 4 Signal capture | `06_learning` `createEventStore()`: sent, opened, replied, meeting booked, bounced | **Partial.** The events are email-only and serve the A/B test. They don't flow back into `01_signals` as new intent. |
-| 5 Follow-up + CRM | `05_activation` mock CRM `syncContact()`, Slack alert | **Partial.** The CRM write happens once, at first activation. There's no follow-up on engagement, no retargeting, and no touch-level attribution. The CRM has no live adapter yet. |
+| 1 Source | `01_signals/sourcing.ts`: `sourceAccounts()` over `AccountListProvider`s, then `mergeByDomain()` | **Built, on mocks.** Five mock lists (BlitzAPI, Sales Navigator, Prospeo, AI Ark, Ocean.io) with overlapping, messy domains. Each listing is an `account-list` signal (tier 2), so one account found by three lists is one lead with three signals. |
+| 2 Qualify: ICP | `03_qualification` | **Built.** The agent gives reasons and code makes the call; a poor fit is held. |
+| 2 Qualify: persona | `04_contacts` `pickBuyer()` + `personas.json` | **Built.** Tries the persona sized for the account, then the next role. Demand Gen / VP Marketing and CRO / VP Sales are fallback personas. |
+| 2 Qualify: email | `04_contacts` waterfall (`emailFinders`) | **Built, on mocks.** Providers are tried in order until one returns a valid address, and each is a priced step. No valid email plus a known LinkedIn profile means LinkedIn steps only. |
+| 3 Channels | `05_activation/channels.ts`, `channels.json`, `adapters/mockAudiences.ts` | **Built as a plan, on mocks.** Email, LinkedIn and call steps, each planned only where the contact can be reached. The account joins ad audiences: LinkedIn by company, Google and Meta by hashed verified email. `selectPostsToPromote()` picks founder posts to run as ads. |
+| 4 Signal capture | `01_signals/intake.ts`, plus the CRM timeline in `adapters/mockCRM.ts` | **Built.** Replies, LinkedIn DMs, ad clicks (`ad_click` + `adPlatform`, e.g. from Fibbler), LinkedIn engagement and booked meetings arrive at one webhook and land on the account's lead. Engagement signals, sent emails and ad audience joins are all logged on one timeline. |
+| 5 Follow-up + CRM | `05_activation/index.ts`, `approvals.ts`, `06_learning/attribution.ts` | **Built.** Engagement after a sent email produces a follow-up draft (touch 2, 3, …) and puts the account in the retargeting audiences, at the same time. With nothing new, the lead is `in_sequence`. A booked meeting goes to sales with multi-touch attribution. `GET /api/accounts/:domain/timeline` serves the timeline. |
 
-## The main structural difference
+## The main structural difference, now closed
 
-Our pipeline is a **line**: signal → enrich → qualify → contact → one email → measure. Allbound is
-a **loop**. Engagement on any channel is a new signal on an account we already know, and it should
-update that account and trigger the next touch, not create a new lead. Most of the gaps above come
-from that one difference, so it's the first thing to change.
+Our pipeline used to be a **line**: signal → enrich → qualify → contact → one email → measure.
+It is now a **loop**. Engagement on any channel is a new signal on an account we already know.
+The account's CRM timeline then decides the next step: a first touch, a follow-up with
+retargeting, waiting, or sales.
 
-## What to borrow, in order
+## Still not live
 
-1. **Account-level dedupe at intake.** Key leads by `companyDomain` and append new signals to the
-   existing lead instead of minting a new one. This prepares for layer 1 (multi-source lists) and
-   is required for layer 4 (engagement as signals).
-2. **Engagement as signals.** Widen the event types beyond email (`post_engaged`,
-   `profile_viewed`, `dm_replied`, `ad_clicked`) and route them through `01_signals` onto the
-   existing account. The A/B store can keep reading the subset it needs.
-3. **Email waterfall with a fallback channel.** Make `EmailFinderProvider` a list that's tried in
-   order, stopping at the first `valid`, with cost per step already tracked in `steps[]`. When
-   nothing verifies, mark the contact `linkedin_only` instead of stopping.
-4. **Channel plan in activation.** Have activation produce a per-contact plan (email draft,
-   LinkedIn steps, ads-audience membership) rather than a single draft. The human approval gate
-   stays on anything sent to a person.
-5. **Touch log for attribution.** Record every touch and engagement against the CRM contact with
-   channel and timestamp, so a booked meeting can be traced to the touches before it.
-6. **Persona set for a marketing-led ICP.** Add Demand Gen, VP Marketing and CRO personas if we
-   target the same buyer. This is config only.
+These run on mocks. Each needs an adapter that implements the existing interface:
 
-Out of scope for now: buying ads and running a sequencer. Like the reference template in
-`reference-architecture-notes.md`, we'd hand those off to a platform (OXYGEN, ad networks via
-an audience sync) and own only the data, the gates and the attribution.
+- **List providers** (`AccountListProvider`): BlitzAPI, Sales Navigator, Prospeo, AI Ark, Ocean.io.
+- **Email waterfall** (`EmailFinderProvider`): the real providers and their verification.
+- **Ad audiences** (`AudienceAdapter`): LinkedIn Matched Audiences, Google Customer Match and
+  Meta Custom Audiences. Uploading personal data to ad platforms needs a lawful basis and an
+  opt-out path; the suppression check already runs before any audience join.
+- **Sequencer**: the channel plan is data. Nothing here sends LinkedIn messages or places
+  calls. A sequencer such as OXYGEN would run the planned steps after a person signs off.
+  Only the email step is sent from this repo, through the approval queue.
+- **Phone numbers**: the call step needs a phone on the contact. No mock or live source
+  provides one except the demo CRO.
+- **CRM**: touches live in the mock CRM's memory. A live Attio/HubSpot adapter would write
+  them as activities on the company record.
+- **Ad engagement feed**: `ad_click` is the intake shape. A live Fibbler (or similar)
+  integration would post to the webhook.
+
+Running ads and a sequencer remain out of scope. Like the reference template in
+`reference-architecture-notes.md`, we hand those off to a platform and own only the data, the
+gates and the attribution.

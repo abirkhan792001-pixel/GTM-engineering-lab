@@ -3,6 +3,7 @@ import { mockScoreRubric } from './03_qualification/index';
 import {
   createLiveResend,
   createLiveSlack,
+  createMockAudiences,
   createMockCRM,
   createMockEmail,
   createMockNotifier,
@@ -27,7 +28,7 @@ export interface Runtime {
   sender: ProspectSender;
   crm: CrmAdapter;
   // What each stage will actually use, for startup logs and health checks.
-  integrations: Record<'enrichment' | 'qualification' | 'contacts' | 'crm' | 'slack' | 'draftReview' | 'sending', string>;
+  integrations: Record<'enrichment' | 'qualification' | 'contacts' | 'crm' | 'adAudiences' | 'slack' | 'draftReview' | 'sending', string>;
   warnings: string[];
 }
 
@@ -41,14 +42,15 @@ export function buildRuntime(config: Config, deps: RuntimeDeps = {}): Runtime {
   const crm = createMockCRM();
   const pipeline: Omit<PipelineOptions, 'clocks'> = {
     qualify: { scorer: mockScoreRubric },
-    adapters: { crm, email: createMockEmail(), notifier: createMockNotifier() },
+    adapters: { crm, email: createMockEmail(), notifier: createMockNotifier(), audiences: createMockAudiences() },
   };
   let sender: ProspectSender = createMockSender();
   const integrations: Runtime['integrations'] = {
     enrichment: 'mock (apollo, firecrawl)',
     qualification: 'offline scorer',
-    contacts: 'mock (people search, email finder)',
+    contacts: 'mock (people search, email waterfall)',
     crm: 'mock',
+    adAudiences: 'mock (linkedin, google, meta)',
     slack: 'mock',
     draftReview: 'off',
     sending: 'mock outbox (approved drafts are not emailed)',
@@ -103,6 +105,7 @@ export function buildRuntime(config: Config, deps: RuntimeDeps = {}): Runtime {
     warnings.push('A CRM key is set, but the CRM adapter is still a mock: nothing is written to your CRM yet.');
   }
   warnings.push('Contact lookup has no live provider yet: real domains will get no recipient.');
+  warnings.push('Ad audiences are still mocks: nothing is uploaded to LinkedIn, Google or Meta.');
 
   return { mode: 'live', pipeline, sender, crm, integrations, warnings };
 }

@@ -1,5 +1,6 @@
-// Learning: deterministic A/B assignment for outreach, plus engagement tracking and
-// per-variant metrics. Other stages and runners import from here, never from the files below.
+// Learning: deterministic A/B assignment for outreach, engagement tracking and per-variant
+// metrics, plus multi-touch attribution of booked meetings. Other stages and runners import
+// from here, never from the files below.
 
 export {
   assignVariant,
@@ -22,3 +23,4 @@ export {
   type ExperimentMetrics,
   type VariantMetrics,
 } from './tracker';
+export { attributeConversion, describeAttribution, type Attribution } from './attribution';

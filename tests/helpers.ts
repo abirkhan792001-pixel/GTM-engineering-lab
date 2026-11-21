@@ -1,6 +1,6 @@
 import { MOCK_AS_OF_MS } from '../src/01_signals/index';
 import { mockScoreRubric } from '../src/03_qualification/index';
-import { createMockCRM, createMockEmail, createMockNotifier } from '../src/05_activation/index';
+import { createMockAudiences, createMockCRM, createMockEmail, createMockNotifier } from '../src/05_activation/index';
 import { assignVariant, type VariantId } from '../src/06_learning/index';
 import type { Contact, EnrichmentResult, Lead, Qualification, Signal } from '../src/shared/types';
 
@@ -89,7 +89,7 @@ export function verifiedContact(overrides: Partial<Contact> = {}): Contact {
 
 // Fresh adapter instances per test, so no state leaks between tests.
 export function freshAdapters() {
-  return { crm: createMockCRM(), email: createMockEmail(), notifier: createMockNotifier() };
+  return { crm: createMockCRM(), email: createMockEmail(), notifier: createMockNotifier(), audiences: createMockAudiences() };
 }
 
 // Collect lead ids that hash to each variant, for tracker tests.

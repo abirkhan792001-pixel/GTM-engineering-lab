@@ -3,6 +3,9 @@ import type { EmailStatus } from '../../shared/types';
 export interface Candidate {
   fullName: string;
   title: string;
+  // When the source has them: used for LinkedIn steps and call tasks.
+  linkedinUrl?: string;
+  phone?: string;
 }
 
 // Looks up the people employed at a company (e.g. an Apollo people search).

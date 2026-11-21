@@ -1,33 +1,37 @@
 # GTM-engineering-lab
 
 A code-first go-to-market pipeline in TypeScript: find accounts showing intent, enrich them,
-qualify them with Claude, and hand the good ones to sales. It runs fully offline on mocks by
-default; set `MOCK_MODE=false` to switch on live Claude, Firecrawl, Slack and Resend.
+qualify them with Claude, and hand the good ones to sales. It runs inbound and outbound as one
+allbound motion: sourced lists and inbound signals land on the same account, every channel
+works the same people, and all engagement flows back to one CRM timeline. It runs fully
+offline on mocks by default; set `MOCK_MODE=false` to switch on live Claude, Firecrawl, Slack
+and Resend.
 
 ## How it works
 
 | Stage | What happens | Result |
 |---|---|---|
-| 1. Signals | Collect intent signals (demo requests, signups, LinkedIn engagement, hiring posts) and merge them by company domain | One lead per account, carrying every signal |
+| 1. Signals | Source accounts from list providers, and collect intent and engagement signals (demo requests, signups, LinkedIn engagement, replies, ad clicks, hiring posts); merge them by company domain | One lead per account, carrying every signal |
 | 2. Enrichment | Apollo first (1¢); Firecrawl (5¢) only if data is still missing | Verified company data and cost |
 | 3. Qualification | Dealbreaker rules, then Claude scores against the ICP; intent points follow the signal's warmth tier | Pass, hold or disqualify, with evidence |
-| 4. Contacts | For passing leads only: the person a signal names comes first, else find the buyer; then verify their email | A verified recipient, or the reason there isn't one |
-| 5. Activation | Suppression check; demo requests go straight to sales; the rest are ranked warmest first under a daily limit, then get a CRM record, email draft and Slack alert; a person approves each draft before it's sent | Drafts sent to verified contacts only after approval |
-| 6. Learning | A/B test the email angle, track replies and meetings | Winning variant |
+| 4. Contacts | For passing leads only: the person a signal names comes first, else find the buyer (trying the next persona when one doesn't match); then an email waterfall verifies their address | A verified recipient, or LinkedIn steps only, or the reason there's neither |
+| 5. Activation | Suppression check; demo requests, replies and meetings go straight to sales; the rest are ranked warmest first under a daily limit, then get a CRM record, a channel plan (email, LinkedIn, call, ad audiences), an email draft and a Slack alert; engagement after an email gets a follow-up and retargeting; a person approves each draft before it's sent | Drafts sent to verified contacts only after approval, and a CRM timeline of every touch |
+| 6. Learning | A/B test the email angle, track replies and meetings, attribute booked meetings to the touches before them | Winning variant, and what led to each meeting |
 
 ## Project structure
 
 ```
 src/
-  01_signals/        find accounts showing intent
+  01_signals/        source account lists and collect signals
   02_enrichment/     fill in company data
   03_qualification/  score against the ICP and decide
   04_contacts/       find and verify the buyer to email
-  05_activation/     CRM, email draft, Slack alert
-  06_learning/       A/B test the outreach
-  context/           ICP, personas, voice rules
+  05_activation/     CRM, channel plan, ad audiences, email draft, Slack alert
+  06_learning/       A/B test the outreach, attribute meetings
+  context/           ICP, personas, routing, channels, voice rules
   shared/            schemas and config loaders
   runPipeline.ts     run stages 1-5 end to end
+  runAllbound.ts     the allbound loop: source, run every channel, follow up, attribute
   runtime.ts         pick mock or live integrations from the config
 reports/             generated PDF briefs (git-ignored)
 tests/               one test file per stage, plus a layout check
@@ -56,6 +60,7 @@ npm run pipeline:run  # full pipeline on 4 mock leads
 | `npm run contacts:dev` | Who gets emailed, and why not when no one does |
 | `npm run activate:dev` | What happens for each decision |
 | `npm run pipeline:run` | Every stage per lead, in priority order |
+| `npm run allbound:dev` | The allbound loop over five days, from sourcing to an attributed meeting |
 | `npm run learn:dev` | A/B results across 10 leads |
 | `npm run qualify:live` | Real Claude scoring (needs an API key) |
 | `npm run server:dev` | Webhook server on port 3000 (see below) |
@@ -71,10 +76,10 @@ addressed, and who goes first.
 
 | Tier | Meaning | Signal types | Points |
 |---|---|---|---|
-| 5 | Hand-raise: first-party data only you have | `demo-request`, `contact-form`, `signup` | 28-30 |
-| 4 | Engagement | `linkedin-own-post-engagement`, `pricing-page-visit`, `linkedin-profile-view`, `linkedin-company-follow`, `linkedin-competitor-post-engagement` | 18-24 |
+| 5 | Hand-raise: first-party data only you have | `meeting-booked`, `demo-request`, `contact-form`, `signup`, `email-reply`, `linkedin-reply` | 26-30 |
+| 4 | Engagement | `linkedin-own-post-engagement`, `pricing-page-visit`, `linkedin-profile-view`, `linkedin-company-follow`, `linkedin-competitor-post-engagement`, `ad-click` | 16-24 |
 | 3 | Trigger event | `hiring` | 15 |
-| 2 | Fit (lookalikes, tech stack) | none yet | |
+| 2 | Fit (lookalikes, ICP lists) | `account-list` | 8 |
 | 1 | Data only | anything unlisted (`default`) | 5 |
 
 The config fails to load if a colder tier ever earns more points than a warmer one.
@@ -86,7 +91,8 @@ The config fails to load if a colder tier ever earns more points than a warmer o
   verifies the email they gave if it's on the company's domain. Otherwise it falls back to the
   usual buyer search and records why.
 - **Hand-raisers skip outreach.** A qualified lead with a fresh signal listed in
-  `routing.json` (`routeToSalesSignals`, by default `demo-request`) is `routed_to_sales`: it
+  `routing.json` (`routeToSalesSignals`, by default `demo-request`, `email-reply`,
+  `linkedin-reply` and `meeting-booked`) is `routed_to_sales`: it
   gets a CRM record and a `#hot-leads` alert telling a rep to reply personally, and no
   sequence draft.
 - **Warmest first, under a daily limit.** In a batch (`processBatch`), the other qualified
@@ -96,6 +102,41 @@ The config fails to load if a colder tier ever earns more points than a warmer o
   per UTC day.
 - **Signals decide who, not what to say.** Website visits and LinkedIn engagement are never
   mentioned to the prospect. A draft's one observation comes only from a public job posting.
+
+## Allbound: every channel on the same people
+
+`npm run allbound:dev` runs the whole loop offline (`src/runAllbound.ts`). These are the five layers:
+
+1. **Source.** `sourceAccounts()` pulls accounts from list providers (mocks of BlitzAPI, Sales
+   Navigator, Prospeo, AI Ark and Ocean.io), normalises their domains and merges them into one
+   lead per account. Each listing becomes an `account-list` signal (tier 2), so you can see
+   which lists found an account. A provider that fails is reported and the others still run.
+2. **Qualify.** The ICP scoring is unchanged. Contact lookup tries the persona sized for the
+   account, then the next role: RevOps, founders, then Demand Gen / VP Marketing and CRO /
+   VP Sales. Email goes through a waterfall (`emailFinders`, by default two providers): each
+   provider is a priced step, and the first valid address wins. If nothing verifies but we
+   know the person's LinkedIn profile, the contact runs on **LinkedIn steps only**.
+3. **Run every channel.** An activated lead gets a channel plan from `channels.json`: email,
+   LinkedIn and call steps. Each step is planned only when the contact can be reached that way.
+   The account also joins ad audiences: LinkedIn by company domain, Google and Meta by verified
+   email (hashed). `selectPostsToPromote()` picks which founder posts to run as ads, by
+   engagement rate on enough impressions, and says why every other post was held.
+4. **Capture.** Replies (`email_reply`, `linkedin_reply`), ad clicks from an attribution tool
+   like Fibbler (`ad_click` with `adPlatform`), LinkedIn engagement and booked meetings all
+   arrive at the same webhook and land on the account's lead. Activation logs each engagement
+   signal on the account's CRM timeline. Each approved email and each ad audience the
+   account joins is logged there too.
+5. **Follow up, then attribute.** When an account we already emailed engages again, it gets
+   a follow-up draft (touch 2, 3, …; 60 words max, and it never says what they did) and joins
+   the retargeting audiences, so the follow-up and the ads run at the same time. With nothing
+   new since the last email, the lead is `in_sequence` and nothing is drafted. A booked meeting goes
+   to sales, with a log line listing every touch before it, split into what we did and how
+   they engaged. `GET /api/accounts/:domain/timeline` returns the same timeline and attribution.
+
+The sequence steps are a plan for a sequencer such as OXYGEN, and a person signs off before
+any of them reach the prospect. Only the email step is sent from here, after approval.
+List sources, the second email finder, ad audiences and the sequencer are mocks; see
+`docs/allbound-architecture-notes.md` for what a live setup still needs.
 
 ## Claude scoring
 
@@ -122,8 +163,9 @@ server prints a warning for each fallback.
 | Slack | `SLACK_WEBHOOK_URL` | Posts Block Kit alerts to the webhook's channel |
 | Resend | `RESEND_API_KEY`, `RESEND_FROM` (+ `DRAFT_REVIEW_EMAIL`) | Sends approved drafts to prospects; emails each new draft to your review inbox |
 
-Apollo, contact lookup and the CRM have no live adapters yet, so real domains get no
-recipient and nothing is written to a CRM.
+Apollo, contact lookup, account lists, ad audiences and the CRM have no live adapters yet, so
+real domains get no recipient, nothing is uploaded to an ad platform, and nothing is written
+to a CRM.
 
 ```sh
 npm run server:dev
@@ -135,9 +177,11 @@ curl localhost:3000/api/leads/<leadId>   # decision, contact, outcome and log
 ```
 
 `eventType` is one of `contact_form`, `demo_request`, `signup`, `pricing_page_visit`,
-`linkedin_engagement` or `hiring`. Send `companyDomain`, or an `email` on the company's
-domain. `linkedin_engagement` also needs `engagement`: `own_post`, `competitor_post`,
-`profile_view` or `company_follow`. Optional `name`, `title` and `linkedinUrl` say who it
+`linkedin_engagement`, `hiring`, `email_reply`, `linkedin_reply`, `ad_click` or
+`meeting_booked`. Send `companyDomain`, or an `email` on the company's domain.
+`linkedin_engagement` also needs `engagement`: `own_post`, `competitor_post`,
+`profile_view` or `company_follow`. `ad_click` needs `adPlatform`: `linkedin`, `google` or
+`meta`. Optional `name`, `title` and `linkedinUrl` say who it
 was, so that person can be addressed. Set `WEBHOOK_SECRET` in live mode; callers then send
 it in the `x-webhook-secret` header.
 
@@ -152,6 +196,10 @@ A signal for a company the server already knows answers `"status":"merged"` with
 runs nothing. A lead is never run twice at once: a signal that arrives mid-run queues one
 more run. Leads, like drafts, are kept in memory.
 
+`GET /api/accounts/<domain>/timeline` lists every touch logged for an account (engagement in,
+emails and ad audiences out). Once a meeting is booked, it also returns the meeting's
+attribution. It uses the same token rules as the draft endpoints, because it names people.
+
 ## Approving drafts
 
 No email reaches a prospect until a person approves it. Every draft the pipeline produces waits
@@ -165,9 +213,10 @@ in an approval queue. Approving it sends it, after these checks run again at sen
 - fewer than `dailyOutreachLimit` emails have gone out today (UTC); otherwise approval
   answers `429` and the draft stays pending for tomorrow
 
-There is one draft per lead, so one per account. When a new signal re-runs a lead, a pending
-draft is replaced with the new content, which has a new `contentHash`. If the lead no longer
-gets a draft (say a demo request handed it to sales), the pending draft is blocked. A draft
+There is one draft per lead and touch: the first touch is `draft_<leadId>`, a follow-up is
+`draft_<leadId>_touch2` and so on. When a new signal re-runs a lead, a pending draft for the
+same touch is replaced with the new content, which has a new `contentHash`. If the lead no
+longer gets a draft (say a demo request handed it to sales), its pending drafts are blocked. A draft
 that was already sent is never replaced. Pending drafts are listed warmest first.
 
 ```sh
@@ -202,7 +251,9 @@ Edit the files in `src/context/` to fit your market:
 - `icp.json`: target industries, company size, countries, dealbreakers and scoring,
   including each signal type's warmth tier and points
 - `routing.json`: which signals go straight to sales, and the daily outreach limit
-- `personas.json`: buyer titles and pain points
+- `personas.json`: buyer titles and pain points, in the order roles are tried
+- `channels.json`: the first-touch and follow-up sequences, ad platforms, and the rules for
+  which founder posts run as ads
 - `voice.md`: tone and email rules, which drafts are checked against
 
 ## CI

@@ -1,6 +1,6 @@
 {
-  "version": "personas-v2",
-  "description": "Template buyer personas. Company fit and persona fit are scored independently. The first persona whose headcountRange matches the account is used for drafting.",
+  "version": "personas-v3",
+  "description": "Template buyer personas. Company fit and persona fit are scored independently. The first persona whose headcountRange matches the account is used for drafting. Contact lookup tries that persona first, then the others in order: wrong persona, try the next role. The marketing and revenue leaders have no headcount range, so they are only ever a fallback role.",
   "personas": [
     {
       "id": "revops-leader",
@@ -43,6 +43,43 @@
         "The founder is still running outbound manually",
         "No repeatable system to find accounts showing buying intent",
         "Unsure which messaging or segment actually converts"
+      ]
+    },
+    {
+      "id": "demand-gen-leader",
+      "targetTitles": [
+        "VP Marketing",
+        "Head of Demand Generation",
+        "Director of Demand Generation",
+        "Head of Growth Marketing",
+        "CMO"
+      ],
+      "seniority": [
+        "director",
+        "vp",
+        "c-level"
+      ],
+      "painPoints": [
+        "Marketing and sales run separate funnels at the same accounts",
+        "Paid spend rises while sourced pipeline stays flat",
+        "Hard to prove which ads and posts led to a meeting"
+      ]
+    },
+    {
+      "id": "revenue-leader",
+      "targetTitles": [
+        "Chief Revenue Officer",
+        "CRO",
+        "VP Sales"
+      ],
+      "seniority": [
+        "vp",
+        "c-level"
+      ],
+      "painPoints": [
+        "Customer acquisition cost keeps climbing",
+        "Reps chase accounts that never showed any intent",
+        "Pipeline reviews can't say which channel sourced a deal"
       ]
     }
   ],

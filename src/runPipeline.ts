@@ -3,7 +3,7 @@ import { generateMockSignals, mergeByDomain, MOCK_AS_OF_MS } from './01_signals/
 import { enrichLead, enrichmentStatus, totalEnrichmentCostInCents, type EnrichOptions } from './02_enrichment/index';
 import { mockScoreRubric, qualifyLead, type QualifyOptions } from './03_qualification/index';
 import { lookupContact, totalContactCostInCents, type LookupOptions } from './04_contacts/index';
-import { activateLead, createMockCRM, createMockEmail, createMockNotifier, planOutreach, type ActivateOptions, type OutreachSlot } from './05_activation/index';
+import { activateLead, createMockAudiences, createMockCRM, createMockEmail, createMockNotifier, planOutreach, type ActivateOptions, type OutreachSlot } from './05_activation/index';
 import { writeExecutiveReport } from './shared/pdfReporter';
 import type { ActivationResult, Lead } from './shared/types';
 
@@ -88,7 +88,7 @@ async function main(): Promise<void> {
       activate: () => MOCK_AS_OF_MS + 180_000,
     },
     // Fresh adapter instances so each run starts with an empty CRM and outbox.
-    adapters: { crm: createMockCRM(), email: createMockEmail(), notifier: createMockNotifier() },
+    adapters: { crm: createMockCRM(), email: createMockEmail(), notifier: createMockNotifier(), audiences: createMockAudiences() },
     qualify: { scorer: mockScoreRubric },
   };
 
@@ -135,6 +135,7 @@ async function main(): Promise<void> {
   console.log(`  routed to sales:         ${count('routed_to_sales')}`);
   console.log(`  activated:               ${count('activated')}`);
   console.log(`  queued (over the limit): ${count('queued')}`);
+  console.log(`  in sequence (no news):   ${count('in_sequence')}`);
   console.log(`  manual review:           ${count('manual_review')}`);
   console.log(`  disqualified:            ${count('disqualified')}`);
   console.log(`  suppressed:              ${count('suppressed')}`);

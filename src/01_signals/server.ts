@@ -3,12 +3,13 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { createApprovalService, type ApprovalOutcome, type ApprovalService, type DraftRecord, type DraftStatus, DraftStatusSchema } from '../05_activation/index';
+import { attributeConversion } from '../06_learning/index';
 import { processLead, type PipelineResult } from '../runPipeline';
 import { buildRuntime, type Runtime } from '../runtime';
 import { loadConfig } from '../shared/config';
 import { loadDotEnv } from '../shared/env';
-import type { Lead } from '../shared/types';
-import { IntakeError, IntentSignalSchema, intentToLead } from './intake';
+import type { Lead, Touch } from '../shared/types';
+import { IntakeError, IntentSignalSchema, intentToLead, normalizeDomain } from './intake';
 import { mergeLead } from './merge';
 
 // Real-time signal intake over HTTP (Node's built-in http module, no framework).
@@ -26,6 +27,11 @@ import { mergeLead } from './merge';
 //   GET  /api/drafts/:id                          full draft, content hash and audit history
 //   POST /api/drafts/:id/approve                  {approvedBy, contentHash, acknowledgeReviewNotes?}
 //   POST /api/drafts/:id/reject                   {rejectedBy, reason}
+//
+// Account timeline (same token rules as the drafts, since it names people):
+//   GET  /api/accounts/:domain/timeline           every engagement and outbound touch logged in
+//                                                 the CRM, plus attribution of the latest
+//                                                 booked meeting, if there is one
 //
 // A lead never runs twice at once: a signal that arrives mid-run queues one more run with
 // everything received so far. Each run replaces the lead's pending draft, or withdraws it
@@ -70,6 +76,12 @@ function summarize({ lead, activation }: PipelineResult) {
     outcome: activation.outcome,
     reason: activation.reason,
     draftTo: activation.draft?.to ?? null,
+    // The plan without its targets: which steps run and which ad audiences the account joined.
+    channels: activation.channels && {
+      mode: activation.channels.mode,
+      steps: activation.channels.steps.map(({ day, channel, action, status, reason }) => ({ day, channel, action, status, reason: status === 'skipped' ? reason : undefined })),
+      audiences: activation.channels.audiences.map(({ platform, audience, status }) => ({ platform, audience, status })),
+    },
     alerts: activation.alerts.map(a => ({ channel: a.channel, delivery: a.delivery })),
     log: activation.log,
   };
@@ -296,11 +308,36 @@ export function createSignalServer({ runtime, secret, process: run, approvals: a
     return send(res, APPROVAL_HTTP_STATUS[outcome.code], { error: outcome.message, code: outcome.code, ...(outcome.record && { draft: draftView(outcome.record, true) }) });
   }
 
+  async function handleTimeline(req: IncomingMessage, res: ServerResponse, domain: string): Promise<void> {
+    const denied = approvalAccessError(req);
+    if (denied) return send(res, denied[0], { error: denied[1] });
+    if (req.method !== 'GET') return send(res, 405, { error: 'Use GET' }, { allow: 'GET' });
+    const companyDomain = normalizeDomain(decodeURIComponent(domain));
+    const touches = await runtime.crm.timeline(companyDomain);
+    const meeting = touches.filter(t => t.kind === 'meeting-booked').at(-1);
+    const iso = (t: Touch) => ({ ...t, at: new Date(t.at).toISOString() });
+    const attribution = meeting ? attributeConversion(touches, meeting.at) : null;
+    return send(res, 200, {
+      companyDomain,
+      touches: touches.map(iso),
+      attribution: attribution && {
+        meetingAt: new Date(attribution.conversionAt).toISOString(),
+        touches: attribution.touches.length,
+        daysFromFirstTouch: attribution.daysFromFirstTouch,
+        firstTouch: attribution.firstTouch && iso(attribution.firstTouch),
+        lastTouch: attribution.lastTouch && iso(attribution.lastTouch),
+        byChannel: attribution.byChannel,
+      },
+    });
+  }
+
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const path = url.pathname;
     const route = async () => {
       if (path === '/api/drafts' || path.startsWith('/api/drafts/')) return handleDrafts(req, res, url);
+      const timelineMatch = path.match(/^\/api\/accounts\/([^/]+)\/timeline$/);
+      if (timelineMatch) return handleTimeline(req, res, timelineMatch[1]!);
       if (path === '/api/webhooks/signal') {
         if (req.method !== 'POST') return send(res, 405, { error: 'Use POST' }, { allow: 'POST' });
         return acceptSignal(req, res);
@@ -337,6 +374,7 @@ function main(): void {
     for (const warning of runtime.warnings) console.warn(`  warning: ${warning}`);
     console.log(`  POST /api/webhooks/signal  |  GET /api/leads/:id  |  GET /health`);
     console.log(`  GET /api/drafts  |  GET /api/drafts/:id  |  POST /api/drafts/:id/approve  |  POST /api/drafts/:id/reject`);
+    console.log(`  GET /api/accounts/:domain/timeline`);
   });
 
   const shutdown = () => server.close(() => process.exit(0));

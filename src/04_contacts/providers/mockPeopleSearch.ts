@@ -1,4 +1,4 @@
-import { LEARNING_COHORT } from '../../shared/mockCompanies';
+import { LEARNING_COHORT, SOURCED_ACCOUNTS } from '../../shared/mockCompanies';
 import type { Candidate, PeopleSearchProvider } from './types';
 
 // Simulates a people database search (Apollo-style). Returns everyone listed at a domain,
@@ -9,7 +9,7 @@ const ROSTERS: Record<string, Candidate[]> = {
   'northwind-data.example': [
     { fullName: 'Jana Richter', title: 'Talent Acquisition Partner' },
     { fullName: 'Paul Wagner', title: 'CEO' },
-    { fullName: 'Lena Hoffmann', title: 'Director of Sales Operations' },
+    { fullName: 'Lena Hoffmann', title: 'Director of Sales Operations', linkedinUrl: 'https://linkedin.example/in/lena-hoffmann' },
   ],
   // Demo accounts for the contacts runner: nobody with a buyer title, and a catch-all mail server.
   'tidewater.example': [{ fullName: 'Rosa Martin', title: 'Office Manager' }],
@@ -17,6 +17,8 @@ const ROSTERS: Record<string, Candidate[]> = {
   ...Object.fromEntries(
     LEARNING_COHORT.map(c => [c.domain, [{ fullName: 'Alex Morgan', title: 'Account Executive' }, c.buyer]]),
   ),
+  // List-sourced accounts: a non-buyer plus the buyer, so the persona fallback has to work.
+  ...Object.fromEntries(SOURCED_ACCOUNTS.map(c => [c.domain, [{ fullName: 'Sam Ortiz', title: 'Customer Success Manager' }, { ...c.buyer }]])),
 };
 
 export const mockPeopleSearch: PeopleSearchProvider = {

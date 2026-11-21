@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 export const VoiceGuidelinesSchema = z.strictObject({
   firstTouchMaxWords: z.number().int().positive(),
+  followUpMaxWords: z.number().int().positive(),
   subjectMaxWords: z.number().int().positive(),
   sentenceMaxWords: z.number().int().positive(),
   bannedBuzzwords: z.array(z.string().min(1)).min(1),
@@ -21,6 +22,7 @@ export function parseVoiceGuidelines(markdown: string): VoiceGuidelines {
   const bannedSection = markdown.split(/^## Banned buzzwords\s*$/m)[1]?.split(/^## /m)[0] ?? '';
   return VoiceGuidelinesSchema.parse({
     firstTouchMaxWords: number(/first touch ≤ (\d+) words/, 'first-touch length'),
+    followUpMaxWords: number(/follow-up ≤ (\d+) words/, 'follow-up length'),
     subjectMaxWords: number(/Subject line ≤ (\d+) words/, 'subject length'),
     sentenceMaxWords: number(/Aim for ≤ (\d+) words/, 'sentence length'),
     bannedBuzzwords: bannedSection

@@ -1,8 +1,10 @@
 import { mergedEnrichmentData } from '../../02_enrichment/index';
-import { CrmSyncSchema, type CrmSync, type Lead } from '../../shared/types';
+import { CrmSyncSchema, TouchSchema, type CrmSync, type Lead, type Touch } from '../../shared/types';
 
 // Simulates an Attio/HubSpot connection with an in-memory store. Upserts are
-// idempotent: syncing the same domain twice updates the existing records.
+// idempotent: syncing the same domain twice updates the existing records. Each account
+// also has a timeline of touches (engagement in, outreach out) for attribution; a touch
+// logged twice under the same id is kept once.
 
 export interface SuppressionCheck {
   suppressed: boolean;
@@ -12,6 +14,9 @@ export interface SuppressionCheck {
 export interface CrmAdapter {
   checkSuppression(query: { domain: string; email?: string | null }): Promise<SuppressionCheck>;
   syncContact(lead: Lead): Promise<CrmSync>;
+  logTouch(touch: Touch): Promise<'logged' | 'duplicate'>;
+  // The account's touches, oldest first.
+  timeline(domain: string): Promise<Touch[]>;
 }
 
 export interface CrmFixtures {
@@ -39,12 +44,14 @@ interface CompanyRecord {
 
 const CRM_BASE_URL = 'https://crm.mock.example';
 
-export function createMockCRM(fixtures: CrmFixtures = DEFAULT_CRM_FIXTURES): CrmAdapter & { records: Map<string, CompanyRecord> } {
+export function createMockCRM(fixtures: CrmFixtures = DEFAULT_CRM_FIXTURES): CrmAdapter & { records: Map<string, CompanyRecord>; touches: Map<string, Touch[]> } {
   const records = new Map<string, CompanyRecord>();
+  const touches = new Map<string, Touch[]>();
   const has = (list: string[], value: string) => list.some(item => item.toLowerCase() === value.toLowerCase());
 
   return {
     records,
+    touches,
 
     async checkSuppression({ domain, email }) {
       if (email && has(fixtures.suppressedEmails, email)) return { suppressed: true, reason: `Email ${email} is on the suppression list` };
@@ -90,6 +97,19 @@ export function createMockCRM(fixtures: CrmFixtures = DEFAULT_CRM_FIXTURES): Crm
         dealId: record.dealId,
         url: `${CRM_BASE_URL}/companies/${record.companyRecordId}`,
       });
+    },
+
+    async logTouch(input) {
+      const touch = TouchSchema.parse(input);
+      const list = touches.get(touch.companyDomain) ?? [];
+      touches.set(touch.companyDomain, list);
+      if (list.some(t => t.id === touch.id)) return 'duplicate';
+      list.push(touch);
+      return 'logged';
+    },
+
+    async timeline(domain) {
+      return [...(touches.get(domain.toLowerCase()) ?? [])].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
     },
   };
 }

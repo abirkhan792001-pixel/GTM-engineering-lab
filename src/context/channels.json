@@ -1,0 +1,23 @@
+{
+  "version": "channels-v1",
+  "description": "Allbound channel plan: the same contact gets email, LinkedIn and call steps while their account sits in ad audiences on every platform. firstTouch runs for a new account; followUp runs when someone at an account we already emailed engages again (a post like, profile view, ad click, ...), together with retargeting ads. Steps are planned for a sequencer; a person signs off before any of them reach the prospect. founderPostAds picks which founder posts to run as ads.",
+  "firstTouch": [
+    { "day": 0, "channel": "email", "action": "first-touch-email" },
+    { "day": 1, "channel": "linkedin", "action": "connection-request" },
+    { "day": 3, "channel": "call", "action": "call" },
+    { "day": 4, "channel": "linkedin", "action": "linkedin-message" },
+    { "day": 7, "channel": "email", "action": "follow-up-email" }
+  ],
+  "followUp": [
+    { "day": 0, "channel": "email", "action": "follow-up-email" },
+    { "day": 0, "channel": "linkedin", "action": "linkedin-message" },
+    { "day": 2, "channel": "call", "action": "call" }
+  ],
+  "adPlatforms": ["linkedin", "google", "meta"],
+  "founderPostAds": {
+    "maxAgeDays": 14,
+    "minImpressions": 500,
+    "minEngagementRatePct": 2,
+    "maxPostsToPromote": 2
+  }
+}

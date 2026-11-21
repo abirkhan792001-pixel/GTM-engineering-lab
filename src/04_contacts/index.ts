@@ -3,11 +3,12 @@ import { ICP, type Icp } from '../shared/icp';
 import { PERSONAS, selectPersona, type Persona } from '../shared/personas';
 import { ContactSchema, LeadSchema, type Contact, type ContactLookupStep, type Lead, type Person } from '../shared/types';
 import { freshSignalsByWarmth } from '../shared/warmth';
-import { mockEmailFinder } from './providers/mockEmailFinder';
+import { mockBackupEmailFinder, mockEmailFinder } from './providers/mockEmailFinder';
 import { mockPeopleSearch } from './providers/mockPeopleSearch';
 import type { Candidate, EmailFinderProvider, PeopleSearchProvider } from './providers/types';
 
 export type { Candidate, EmailFinderProvider, PeopleSearchProvider } from './providers/types';
+export { mockBackupEmailFinder, mockEmailFinder } from './providers/mockEmailFinder';
 
 // Contact lookup: find the person to address at an account that passed qualification.
 //   1. If a fresh signal names someone (a form fill, signup or LinkedIn engager), they come
@@ -15,8 +16,11 @@ export type { Candidate, EmailFinderProvider, PeopleSearchProvider } from './pro
 //      signal without a title is matched against the people search to find it.
 //   2. Otherwise people search lists who works there; the first person whose title matches
 //      a persona in personas.json wins (the persona sized for the account first, then the others).
-//   3. Their work email: the one the signal gave, if it is on the company's domain, is
-//      verified; otherwise an email finder guesses and verifies one.
+//   3. Their work email, through a waterfall: the one the signal gave, if it is on the
+//      company's domain, is verified first; then each email finder in turn guesses and
+//      verifies one, stopping at the first valid address. Each provider is a priced step.
+//   4. No valid email anywhere: the contact stays unverified, and if we know their LinkedIn
+//      profile the sequence runs on LinkedIn steps only (see 05_activation/channels.ts).
 // Only leads that passed qualification are looked up, so nothing is spent on holds or
 // disqualified accounts. Only a 'valid' email becomes a sendable recipient; catch-all,
 // unknown or invalid addresses are kept for a human to check but never used as `to`.
@@ -25,8 +29,13 @@ export type { Candidate, EmailFinderProvider, PeopleSearchProvider } from './pro
 export const MAX_VERIFICATION_AGE_DAYS = 7;
 const DAY_MS = 86_400_000;
 
+// Tried in order until one returns a valid address.
+export const DEFAULT_EMAIL_WATERFALL: readonly EmailFinderProvider[] = [mockEmailFinder, mockBackupEmailFinder];
+
 export interface LookupOptions {
   peopleSearch?: PeopleSearchProvider;
+  // The email waterfall, in order. `emailFinder` is shorthand for a one-provider waterfall.
+  emailFinders?: readonly EmailFinderProvider[];
   emailFinder?: EmailFinderProvider;
   personas?: Persona[];
   excludedTitles?: string[];
@@ -41,7 +50,6 @@ export async function lookupContact(lead: Lead, options: LookupOptions = {}): Pr
 
   const {
     peopleSearch = mockPeopleSearch,
-    emailFinder = mockEmailFinder,
     personas = PERSONAS.personas,
     excludedTitles = PERSONAS.excludedTitles,
     icp = ICP,
@@ -49,6 +57,7 @@ export async function lookupContact(lead: Lead, options: LookupOptions = {}): Pr
   } = options;
   const lookedUpAt = now();
   const steps: ContactLookupStep[] = [];
+  const waterfall = options.emailFinders ?? (options.emailFinder ? [options.emailFinder] : DEFAULT_EMAIL_WATERFALL);
 
   const headcount = mergedEnrichmentData(lead).headcount;
   const preferred = selectPersona(typeof headcount === 'number' ? headcount : null, personas);
@@ -68,25 +77,45 @@ export async function lookupContact(lead: Lead, options: LookupOptions = {}): Pr
     return roster;
   }
 
+  // One waterfall step; a provider error counts as a failed step, never a crash.
+  async function attempt(finder: EmailFinderProvider, run: () => Promise<{ email: string | null; status: Contact['emailStatus'] }>) {
+    try {
+      const found = await run();
+      steps.push({ step: 'email_finder', source: finder.name, status: found.email ? 'found' : 'not_found', costInCents: finder.costInCents });
+      return found;
+    } catch {
+      steps.push({ step: 'email_finder', source: finder.name, status: 'failed', costInCents: finder.costInCents });
+      return { email: null, status: null };
+    }
+  }
+
   // What is their verified work email? `note` explains how they were chosen, if not the usual way.
   async function withEmail(person: Person, knownEmail: string | null, note: string | null): Promise<Lead> {
-    let found: { email: string | null; status: Contact['emailStatus'] } = { email: null, status: null };
-    try {
-      found = knownEmail && emailFinder.verify
-        ? await emailFinder.verify(knownEmail)
-        : await emailFinder.find({ fullName: person.fullName, companyDomain: lead.companyDomain });
-      steps.push({ step: 'email_finder', source: emailFinder.name, status: found.email ? 'found' : 'not_found', costInCents: emailFinder.costInCents });
-    } catch {
-      steps.push({ step: 'email_finder', source: emailFinder.name, status: 'failed', costInCents: emailFinder.costInCents });
+    // The best non-valid result, kept for a human to check if nothing in the waterfall verifies.
+    let fallback: { email: string | null; status: Contact['emailStatus'] } = { email: null, status: null };
+    let valid: string | null = null;
+
+    const verifier = knownEmail ? waterfall.find(finder => finder.verify) : undefined;
+    if (knownEmail && verifier) {
+      const checked = await attempt(verifier, () => verifier.verify!(knownEmail));
+      if (checked.email && checked.status === 'valid') valid = checked.email;
+      else if (checked.email) fallback = checked;
+    }
+    for (const finder of waterfall) {
+      if (valid) break;
+      const found = await attempt(finder, () => finder.find({ fullName: person.fullName, companyDomain: lead.companyDomain }));
+      if (found.email && found.status === 'valid') valid = found.email;
+      else if (found.email && !fallback.email) fallback = found;
     }
 
     const who = `${person.fullName}, ${person.title} (persona '${person.personaId}')`;
     const suffix = note ? ` (${note})` : '';
-    if (found.email && found.status === 'valid') {
-      return withContact(lead, { status: 'verified', person, email: found.email, emailStatus: 'valid', verifiedAt: lookedUpAt, steps, reason: `${who}: email verified${suffix}` }, lookedUpAt);
+    if (valid) {
+      return withContact(lead, { status: 'verified', person, email: valid, emailStatus: 'valid', verifiedAt: lookedUpAt, steps, reason: `${who}: email verified${suffix}` }, lookedUpAt);
     }
-    const why = !found.email ? 'no email found' : `email status is ${found.status}, so delivery can't be confirmed`;
-    return withContact(lead, { status: 'unverified', person, email: found.email, emailStatus: found.status, verifiedAt: null, steps, reason: `${who}: ${why}${suffix}` }, lookedUpAt);
+    const why = !fallback.email ? 'no email found' : `email status is ${fallback.status}, so delivery can't be confirmed`;
+    const linkedinOnly = person.linkedinUrl ? '; LinkedIn steps only' : '';
+    return withContact(lead, { status: 'unverified', person, email: fallback.email, emailStatus: fallback.status, verifiedAt: null, steps, reason: `${who}: ${why}${linkedinOnly}${suffix}` }, lookedUpAt);
   }
 
   // 1. The person a signal names, if they are a buyer.
@@ -94,8 +123,12 @@ export async function lookupContact(lead: Lead, options: LookupOptions = {}): Pr
   const named = namedBySignal(lead, lookedUpAt, icp);
   if (named) {
     steps.push({ step: 'signal', source: named.source, status: 'found', costInCents: 0 });
-    const title = named.title ?? (await searchPeople()).find(c => norm(c.fullName) === norm(named.fullName))?.title ?? null;
-    const person = title ? pickBuyer([{ fullName: named.fullName, title }], personaOrder, excludedTitles) : null;
+    // A signal without a title is matched against the people search, which may also know how to reach them.
+    const listed = named.title ? undefined : (await searchPeople()).find(c => norm(c.fullName) === norm(named.fullName));
+    const title = named.title ?? listed?.title ?? null;
+    const linkedinUrl = named.linkedinUrl ?? listed?.linkedinUrl;
+    const candidate: Candidate = { fullName: named.fullName, title: title ?? '', ...(linkedinUrl && { linkedinUrl }), ...(listed?.phone && { phone: listed.phone }) };
+    const person = title ? pickBuyer([candidate], personaOrder, excludedTitles) : null;
     if (person) return withEmail(person, named.email, `named by the ${named.type} signal`);
     passedOver = title
       ? `${named.fullName} (${title}) from the ${named.type} signal is not a buyer persona`
@@ -117,12 +150,13 @@ const norm = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').tr
 const text = (value: unknown) => (typeof value === 'string' && value.trim() ? value.trim() : null);
 
 // The person the warmest fresh signal names, with the email it gave if that is on the company's domain.
-function namedBySignal(lead: Lead, asOfMs: number, icp: Icp): { fullName: string; title: string | null; email: string | null; type: string; source: string } | null {
+function namedBySignal(lead: Lead, asOfMs: number, icp: Icp): { fullName: string; title: string | null; email: string | null; linkedinUrl: string | null; type: string; source: string } | null {
   for (const { signal, type } of freshSignalsByWarmth(lead.signals, asOfMs, icp)) {
     const fullName = text(signal.rawData.contactName);
     if (!fullName) continue;
     const email = text(signal.rawData.contactEmail)?.toLowerCase() ?? null;
-    return { fullName, title: text(signal.rawData.contactTitle), email: email?.endsWith(`@${lead.companyDomain}`) ? email : null, type, source: signal.source };
+    const linkedinUrl = text(signal.rawData.contactLinkedinUrl);
+    return { fullName, title: text(signal.rawData.contactTitle), email: email?.endsWith(`@${lead.companyDomain}`) ? email : null, linkedinUrl, type, source: signal.source };
   }
   return null;
 }
@@ -134,7 +168,9 @@ function pickBuyer(candidates: Candidate[], personas: Persona[], excludedTitles:
   for (const persona of personas) {
     for (const target of persona.targetTitles) {
       const match = eligible.find(c => norm(c.title) === norm(target));
-      if (match) return { fullName: match.fullName, title: match.title, personaId: persona.id };
+      if (match) {
+        return { fullName: match.fullName, title: match.title, personaId: persona.id, ...(match.linkedinUrl && { linkedinUrl: match.linkedinUrl }), ...(match.phone && { phone: match.phone }) };
+      }
     }
   }
   return null;

@@ -3,6 +3,7 @@ import { enrichLead } from '../02_enrichment/index';
 import { mockScoreRubric, qualifyLead } from '../03_qualification/index';
 import { lookupContact } from '../04_contacts/index';
 import type { Lead } from '../shared/types';
+import { createMockAudiences } from './adapters/mockAudiences';
 import { createMockCRM } from './adapters/mockCRM';
 import { createMockEmail } from './adapters/mockEmail';
 import { createMockNotifier } from './adapters/mockNotifier';
@@ -48,7 +49,7 @@ async function main(): Promise<void> {
   }
   qualified.push({ label: 'existing-customer fixture', lead: existingCustomerFixture });
 
-  const adapters = { crm: createMockCRM(), email: createMockEmail(), notifier: createMockNotifier() };
+  const adapters = { crm: createMockCRM(), email: createMockEmail(), notifier: createMockNotifier(), audiences: createMockAudiences() };
   console.log(`[05_activation] routing ${qualified.length} qualified leads\n`);
 
   for (const { label, lead } of qualified) {

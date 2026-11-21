@@ -1,4 +1,4 @@
-import { SlackAlertSchema, type CrmSync, type EmailDraft, type Lead, type SlackAlert, type SlackChannel } from '../../shared/types';
+import { SlackAlertSchema, type ChannelPlan, type CrmSync, type EmailDraft, type Lead, type SlackAlert, type SlackChannel } from '../../shared/types';
 
 // Simulates Slack. Alerts are formatted for a rep to act on without opening the
 // pipeline, and collected in an in-memory outbox instead of being posted.
@@ -9,6 +9,8 @@ export interface AlertContext {
   draft?: EmailDraft | null;
   // Set when the lead skips outreach and goes straight to sales: what the rep should do.
   handoff?: string;
+  // The sequence steps and ad audiences for an activated lead.
+  channels?: ChannelPlan | null;
 }
 
 export interface NotifierAdapter {
@@ -52,7 +54,13 @@ export function formatAlert(lead: Lead, channel: SlackChannel, context: AlertCon
   }
   if (context.crm) lines.push(`*CRM:* ${context.crm.url} (${context.crm.action})`);
   if (context.draft) {
-    lines.push(`*Draft:* "${context.draft.subject}" (${context.draft.variantId}) awaiting approval (${context.draft.reviewNotes.length} review note(s))`);
+    const kind = context.draft.touch === 'follow_up' ? `follow-up, touch ${context.draft.touchNumber}` : context.draft.variantId;
+    lines.push(`*Draft:* "${context.draft.subject}" (${kind}) awaiting approval (${context.draft.reviewNotes.length} review note(s))`);
+  }
+  if (context.channels) {
+    const planned = context.channels.steps.filter(s => s.status === 'planned').map(s => `day ${s.day} ${s.action}`);
+    const ads = [...new Set(context.channels.audiences.filter(a => a.status === 'added' || a.status === 'already_member').map(a => `${a.platform} ${a.audience}`))];
+    lines.push(`*Sequence:* ${planned.length ? planned.join(', ') : 'no reachable channel'}`, `*Ads:* ${ads.length ? ads.join(', ') : 'none'}`);
   }
   if (channel === '#manual-review') lines.push('*Next step:* fill the missing fields or confirm fit, then re-run qualification.');
   return lines.join('\n');

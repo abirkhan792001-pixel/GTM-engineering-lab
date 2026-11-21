@@ -1,13 +1,29 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { CompanyDomainSchema, LeadSchema, type Lead } from '../shared/types';
+import { AdPlatformSchema, CompanyDomainSchema, LeadSchema, type Lead } from '../shared/types';
 
-// Converts an inbound webhook (contact form, signup, LinkedIn engagement, ...) into a lead.
+// Converts an inbound webhook (contact form, signup, LinkedIn engagement, a reply, an ad click
+// from an ad-attribution tool such as Fibbler, a booked meeting, ...) into a lead. Every
+// channel's engagement comes in here, so it all lands on the one lead for the account.
 // The payload is untrusted: it is validated here, unknown top-level keys are dropped, and
 // its contents only ever travel as signal rawData, which never counts as verified company
 // data. The company is identified by companyDomain, or failing that the email's domain.
 
-export const INTENT_EVENT_TYPES = ['contact_form', 'demo_request', 'signup', 'pricing_page_visit', 'linkedin_engagement', 'hiring'] as const;
+export const INTENT_EVENT_TYPES = [
+  'contact_form',
+  'demo_request',
+  'signup',
+  'pricing_page_visit',
+  'linkedin_engagement',
+  'hiring',
+  // Engagement with our outreach: a reply to an email, or a LinkedIn DM reply.
+  'email_reply',
+  'linkedin_reply',
+  // Someone at the account clicked one of our ads (needs adPlatform).
+  'ad_click',
+  // The conversion: a meeting was booked. Used for attribution.
+  'meeting_booked',
+] as const;
 
 // What a linkedin_engagement event was, and the signal type (icp.json scoring.signals) it becomes.
 const LinkedinEngagementSchema = z.enum(['own_post', 'competitor_post', 'profile_view', 'company_follow']);
@@ -31,6 +47,8 @@ export const IntentSignalSchema = z
     // Required for linkedin_engagement: liked or commented on your post or a competitor's,
     // viewed your profile, or followed your company page.
     engagement: LinkedinEngagementSchema.optional(),
+    // Required for ad_click: which ad network the click came from.
+    adPlatform: AdPlatformSchema.optional(),
     companyName: z.string().trim().min(1).max(120).optional(),
     occurredAt: z.iso.datetime({ offset: true }).optional(),
     // Anything else the sender wants to keep with the signal.
@@ -40,6 +58,10 @@ export const IntentSignalSchema = z
   .refine(s => (s.eventType === 'linkedin_engagement') === Boolean(s.engagement), {
     message: `engagement (${LinkedinEngagementSchema.options.join(', ')}) is required for linkedin_engagement and only allowed there`,
     path: ['engagement'],
+  })
+  .refine(s => (s.eventType === 'ad_click') === Boolean(s.adPlatform), {
+    message: `adPlatform (${AdPlatformSchema.options.join(', ')}) is required for ad_click and only allowed there`,
+    path: ['adPlatform'],
   });
 export type IntentSignal = z.infer<typeof IntentSignalSchema>;
 
@@ -95,6 +117,7 @@ export function intentToLead(signal: IntentSignal, { now = Date.now(), id = () =
           ...(signal.title && { contactTitle: signal.title }),
           ...(signal.email && { contactEmail: signal.email }),
           ...(signal.linkedinUrl && { contactLinkedinUrl: signal.linkedinUrl }),
+          ...(signal.adPlatform && { adPlatform: signal.adPlatform }),
           ...(signal.metadata && { metadata: signal.metadata }),
         },
       },

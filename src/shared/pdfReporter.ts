@@ -45,7 +45,8 @@ export interface ProspectProfile {
   evidence: string[];
   buyer: { name: string; title: string; email: string | null; emailStatus: string } | null;
   draft: { to: string | null; subject: string; body: string; variantId: string; reviewNotes: string[] } | null;
-  // Why there is no draft for a passing lead: handed to sales, or queued over the daily limit.
+  // Why there is no draft for a passing lead: handed to sales, queued over the daily limit, or
+  // already emailed with nothing new since (in sequence).
   noDraftReason: string | null;
 }
 

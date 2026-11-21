@@ -28,3 +28,24 @@ export const LEARNING_COHORT: readonly MockCompany[] = [
   { domain: 'ironleaf.example', name: 'Ironleaf', industry: 'Fintech Infrastructure', headcount: 180, hqCountry: 'AT', hiringFor: 'VP Revenue Operations', signalAgeDays: 3, buyer: { fullName: 'Lukas Huber', title: 'Director of Sales Operations' } },
   { domain: 'junipersignal.example', name: 'Juniper Signal', industry: 'B2B SaaS', headcount: 55, hqCountry: 'US', hiringFor: 'RevOps Manager', signalAgeDays: 2, buyer: { fullName: 'Grace Liu', title: 'Founder' } },
 ];
+
+// Accounts that only reach the pipeline through account lists (01_signals/sourcing.ts).
+// Each exercises an allbound path: a marketing-persona buyer whose email only the second
+// finder in the waterfall knows, a catch-all mail server (LinkedIn steps only), a CRO with
+// a phone number (call step), and an agency the ICP disqualifies. Phone numbers are in the
+// 555-0100..0199 range reserved for fiction; LinkedIn URLs use a reserved `.example` host.
+export interface SourcedCompany {
+  domain: string;
+  name: string;
+  industry: string;
+  headcount: number;
+  hqCountry: string;
+  buyer: { fullName: string; title: string; linkedinUrl?: string; phone?: string };
+}
+
+export const SOURCED_ACCOUNTS: readonly SourcedCompany[] = [
+  { domain: 'quillstack.example', name: 'Quill Stack', industry: 'B2B SaaS', headcount: 120, hqCountry: 'US', buyer: { fullName: 'Sofia Alvarez', title: 'VP Marketing', linkedinUrl: 'https://linkedin.example/in/sofia-alvarez' } },
+  { domain: 'tallowworks.example', name: 'Tallow Works', industry: 'Data & Analytics', headcount: 70, hqCountry: 'GB', buyer: { fullName: 'Owen Pike', title: 'Head of Demand Generation', linkedinUrl: 'https://linkedin.example/in/owen-pike' } },
+  { domain: 'orchardops.example', name: 'Orchard Ops', industry: 'Developer Tools', headcount: 160, hqCountry: 'US', buyer: { fullName: 'Hannah Vogel', title: 'Chief Revenue Officer', linkedinUrl: 'https://linkedin.example/in/hannah-vogel', phone: '+1 555 0142' } },
+  { domain: 'vervepath.example', name: 'Verve Path', industry: 'Marketing Agency', headcount: 40, hqCountry: 'US', buyer: { fullName: 'Leo Grant', title: 'CEO' } },
+];
