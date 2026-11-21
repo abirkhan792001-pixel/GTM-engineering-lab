@@ -22,7 +22,10 @@ export const IcpSchema = z
     }),
     scoring: z.strictObject({
       weights: z.strictObject({ industry: Points, companySize: Points, country: Points }),
-      signalPoints: z.record(z.string(), Points).refine(p => 'default' in p, "signalPoints needs a 'default' entry"),
+      // Signal type -> warmth tier (5 = hand-raise ... 1 = data only, see shared/warmth.ts) and points.
+      signals: z
+        .record(z.string(), z.strictObject({ tier: z.number().int().min(1).max(5), points: Points }))
+        .refine(s => 'default' in s, "signals needs a 'default' entry"),
       maxSignalAgeDays: z.number().positive(),
     }),
     qualification: z.strictObject({
@@ -33,9 +36,17 @@ export const IcpSchema = z
     }),
   })
   .superRefine((icp, ctx) => {
-    const { weights, signalPoints } = icp.scoring;
-    const max = weights.industry + weights.companySize + weights.country + Math.max(...Object.values(signalPoints));
+    const { weights, signals } = icp.scoring;
+    const rules = Object.entries(signals);
+    const max = weights.industry + weights.companySize + weights.country + Math.max(...rules.map(([, r]) => r.points));
     if (max !== 100) ctx.addIssue({ code: 'custom', path: ['scoring'], message: `Maximum rubric score is ${max}; it must be 100` });
+    // The ladder must hold: a warmer signal never earns fewer points than a colder one.
+    for (const [type, rule] of rules) {
+      const colder = rules.find(([, other]) => other.tier < rule.tier && other.points > rule.points);
+      if (colder) {
+        ctx.addIssue({ code: 'custom', path: ['scoring', 'signals', type], message: `'${type}' (tier ${rule.tier}) earns fewer points than colder '${colder[0]}' (tier ${colder[1].tier})` });
+      }
+    }
     if (icp.qualification.holdThreshold > icp.qualification.passThreshold) {
       ctx.addIssue({ code: 'custom', path: ['qualification'], message: 'holdThreshold must not exceed passThreshold' });
     }

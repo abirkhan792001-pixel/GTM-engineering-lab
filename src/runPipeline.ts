@@ -1,15 +1,17 @@
 import { pathToFileURL } from 'node:url';
-import { generateMockSignals, MOCK_AS_OF_MS } from './01_signals/index';
+import { generateMockSignals, mergeByDomain, MOCK_AS_OF_MS } from './01_signals/index';
 import { enrichLead, enrichmentStatus, totalEnrichmentCostInCents, type EnrichOptions } from './02_enrichment/index';
 import { mockScoreRubric, qualifyLead, type QualifyOptions } from './03_qualification/index';
 import { lookupContact, totalContactCostInCents, type LookupOptions } from './04_contacts/index';
-import { activateLead, createMockCRM, createMockEmail, createMockNotifier, type ActivateOptions } from './05_activation/index';
+import { activateLead, createMockCRM, createMockEmail, createMockNotifier, planOutreach, type ActivateOptions, type OutreachSlot } from './05_activation/index';
 import { writeExecutiveReport } from './shared/pdfReporter';
 import type { ActivationResult, Lead } from './shared/types';
 
 // End-to-end runner: 01 signals -> 02 enrichment -> 03 qualification -> 04 contacts -> 05 activation.
 // Mock providers and adapters only: no network, no CRM writes, no email sent. The runner
 // scores with the deterministic offline scorer; processLead() uses Claude unless told otherwise.
+// processLead() runs one lead; processBatch() merges a batch to one lead per account and
+// lets the priority plan decide who gets today's drafts.
 //
 //   --export-pdf        also write an executive PDF brief of the run
 //   --out <path>        where to write it (default reports/gtm-brief-procuros.pdf)
@@ -33,20 +35,51 @@ export interface PipelineResult {
   activation: ActivationResult;
 }
 
-export async function processLead(signalLead: Lead, options: PipelineOptions = {}): Promise<PipelineResult> {
-  const clocks = options.clocks ?? { enrich: Date.now, qualify: Date.now, contacts: Date.now, activate: Date.now };
+export interface BatchResult extends PipelineResult {
+  // Where the priority plan put this lead (sales, outreach, queued or not qualified), and why.
+  slot: OutreachSlot;
+}
+
+type Clocks = NonNullable<PipelineOptions['clocks']>;
+const realClocks = (): Clocks => ({ enrich: Date.now, qualify: Date.now, contacts: Date.now, activate: Date.now });
+
+// Stages 02-04: enrich, qualify, then find the contact for leads that passed.
+async function prepareLead(signalLead: Lead, options: PipelineOptions, clocks: Clocks): Promise<Lead> {
   const enriched = await enrichLead(signalLead, { ...options.enrich, now: clocks.enrich });
   const qualified = await qualifyLead(enriched, { ...options.qualify, now: clocks.qualify });
-  const withContact = await lookupContact(qualified, { ...options.contacts, now: clocks.contacts });
-  const activation = await activateLead(withContact, { ...options.adapters, now: clocks.activate });
-  return { lead: withContact, activation };
+  return lookupContact(qualified, { ...options.contacts, now: clocks.contacts });
+}
+
+export async function processLead(signalLead: Lead, options: PipelineOptions = {}): Promise<PipelineResult> {
+  const clocks = options.clocks ?? realClocks();
+  const lead = await prepareLead(signalLead, options, clocks);
+  const activation = await activateLead(lead, { ...options.adapters, now: clocks.activate });
+  return { lead, activation };
+}
+
+// Results come back in activation order: sales handoffs, outreach by priority, the queue,
+// then leads that did not pass. `dailyOutreachLimit` defaults to routing.json.
+export async function processBatch(signalLeads: Lead[], options: PipelineOptions & { dailyOutreachLimit?: number } = {}): Promise<BatchResult[]> {
+  const clocks = options.clocks ?? realClocks();
+  const prepared: Lead[] = [];
+  for (const lead of mergeByDomain(signalLeads)) prepared.push(await prepareLead(lead, options, clocks));
+
+  const byId = new Map(prepared.map(lead => [lead.id, lead]));
+  const results: BatchResult[] = [];
+  for (const slot of planOutreach(prepared, { asOfMs: clocks.activate(), limit: options.dailyOutreachLimit })) {
+    const lead = byId.get(slot.leadId)!;
+    const queuedReason = slot.lane === 'queued' ? slot.reason : undefined;
+    results.push({ lead, activation: await activateLead(lead, { ...options.adapters, queuedReason, now: clocks.activate }), slot });
+  }
+  return results;
 }
 
 const formatUsd = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 const indent = (text: string, pad: string) => text.split('\n').map(line => pad + line).join('\n');
 
 async function main(): Promise<void> {
-  const leads = generateMockSignals();
+  const mock = generateMockSignals();
+  const scenarioOf = new Map(mock.map(({ scenario, lead }) => [lead.id, scenario]));
   const options: PipelineOptions = {
     clocks: {
       enrich: () => MOCK_AS_OF_MS + 60_000,
@@ -59,13 +92,11 @@ async function main(): Promise<void> {
     qualify: { scorer: mockScoreRubric },
   };
 
-  console.log(`GTM pipeline: ${leads.length} raw signal leads -> enrichment -> qualification -> activation\n`);
+  console.log(`GTM pipeline: ${mock.length} raw signal leads -> enrichment -> qualification -> contacts -> priority -> activation\n`);
 
-  const results: PipelineResult[] = [];
-  for (const { scenario, lead: signalLead } of leads) {
-    const result = await processLead(signalLead, options);
-    results.push(result);
-    const { lead, activation } = result;
+  const results = await processBatch(mock.map(m => m.lead), options);
+  for (const { lead, activation, slot } of results) {
+    const scenario = scenarioOf.get(lead.id) ?? 'merged';
     const q = lead.qualification!;
     const cost = totalEnrichmentCostInCents(lead);
 
@@ -76,6 +107,7 @@ async function main(): Promise<void> {
     const c = lead.contact;
     const contactCost = totalContactCostInCents(lead);
     console.log(`  04 contacts:      ${c ? `${c.status}: ${c.reason}, ${contactCost}¢` : 'skipped (only looked up for passing leads)'}`);
+    console.log(`  priority:         ${slot.lane}: ${slot.reason}`);
     console.log(`  05 activation:    ${activation.outcome} (${activation.active ? 'active' : 'inactive'}): ${activation.reason}`);
     for (const line of activation.log) console.log(`      - ${line}`);
     if (activation.draft) {
@@ -100,7 +132,9 @@ async function main(): Promise<void> {
   const contactSpend = results.reduce((sum, r) => sum + totalContactCostInCents(r.lead), 0);
   console.log(`  enrichment spend:        ${spend}¢ (${formatUsd(spend)})`);
   console.log(`  contact lookup spend:    ${contactSpend}¢ (${formatUsd(contactSpend)})`);
+  console.log(`  routed to sales:         ${count('routed_to_sales')}`);
   console.log(`  activated:               ${count('activated')}`);
+  console.log(`  queued (over the limit): ${count('queued')}`);
   console.log(`  manual review:           ${count('manual_review')}`);
   console.log(`  disqualified:            ${count('disqualified')}`);
   console.log(`  suppressed:              ${count('suppressed')}`);

@@ -9,11 +9,14 @@ import { loadConfig } from '../shared/config';
 import { loadDotEnv } from '../shared/env';
 import type { Lead } from '../shared/types';
 import { IntakeError, IntentSignalSchema, intentToLead } from './intake';
+import { mergeLead } from './merge';
 
 // Real-time signal intake over HTTP (Node's built-in http module, no framework).
 //
-//   POST /api/webhooks/signal  validate an IntentSignal, create a lead, answer 202 with its id,
-//                              then run the pipeline for it in the background
+//   POST /api/webhooks/signal  validate an IntentSignal, add it to its account's lead (one lead
+//                              per company domain), answer 202 with the lead id, then run the
+//                              pipeline for the merged lead in the background. An exact repeat
+//                              of a signal already on the lead answers 200 and runs nothing.
 //   GET  /api/leads/:id        processing status and result summary for that lead
 //   GET  /health               mode and which integrations are live
 //
@@ -24,9 +27,13 @@ import { IntakeError, IntentSignalSchema, intentToLead } from './intake';
 //   POST /api/drafts/:id/approve                  {approvedBy, contentHash, acknowledgeReviewNotes?}
 //   POST /api/drafts/:id/reject                   {rejectedBy, reason}
 //
+// A lead never runs twice at once: a signal that arrives mid-run queues one more run with
+// everything received so far. Each run replaces the lead's pending draft, or withdraws it
+// when the lead no longer gets one (e.g. a demo request handed it to sales).
+//
 // Hardening: JSON only, 64 KB body limit, optional shared secret (x-webhook-secret, compared
-// in constant time), bounded in-memory job and draft stores. Pipeline errors mark the job
-// failed; they never take the server down.
+// in constant time), bounded in-memory lead, job and draft stores. Pipeline errors mark the
+// job failed; they never take the server down.
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_JOBS = 1000;
@@ -34,6 +41,8 @@ const MAX_JOBS = 1000;
 export interface LeadJob {
   leadId: string;
   companyDomain: string;
+  // Signals on the lead so far, across every webhook for this account.
+  signalCount: number;
   status: 'processing' | 'done' | 'failed';
   receivedAt: string;
   finishedAt?: string;
@@ -77,7 +86,16 @@ const APPROVAL_HTTP_STATUS: Record<Extract<ApprovalOutcome, { ok: false }>['code
   conflict: 409,
   blocked: 422,
   send_failed: 502,
+  limit_reached: 429,
 };
+
+// One account's lead as signals arrive. `lead` is signal-stage only; each run starts from it.
+interface Account {
+  lead: Lead;
+  job: LeadJob;
+  running: boolean;
+  rerun: boolean;
+}
 
 // What reviewers see. The lead snapshot stays server-side apart from the contact summary.
 function draftView(record: DraftRecord, full: boolean) {
@@ -129,13 +147,42 @@ export function createSignalServer({ runtime, secret, process: run, approvals: a
   approvals: ApprovalService;
 } {
   const jobs = new Map<string, LeadJob>();
+  const accounts = new Map<string, Account>();
   const runPipeline = run ?? ((lead: Lead) => processLead(lead, runtime.pipeline));
   const approvals = approvalService ?? createApprovalService({ sender: runtime.sender, crm: runtime.crm });
 
-  const remember = (job: LeadJob) => {
-    jobs.set(job.leadId, job);
-    if (jobs.size > MAX_JOBS) jobs.delete(jobs.keys().next().value!);
+  const remember = (account: Account) => {
+    accounts.set(account.lead.companyDomain, account);
+    jobs.set(account.job.leadId, account.job);
+    if (jobs.size > MAX_JOBS) {
+      const oldest = jobs.values().next().value!;
+      jobs.delete(oldest.leadId);
+      accounts.delete(oldest.companyDomain);
+    }
   };
+
+  // Runs the pipeline for an account until no new signal arrived during the last run.
+  // The caller marks the account running before scheduling this.
+  async function drain(account: Account): Promise<void> {
+    const { job } = account;
+    do {
+      account.rerun = false;
+      const lead = account.lead;
+      try {
+        const result = await runPipeline(lead);
+        const draft = result.activation.draft
+          ? approvals.register(result.lead, result.activation.draft)
+          : approvals.withdraw(lead.id, `Superseded: the lead is now ${result.activation.outcome}`);
+        Object.assign(job, { status: 'done', finishedAt: new Date().toISOString(), error: undefined, result: { ...summarize(result), draftId: draft?.id ?? null } });
+        log(`[pipeline] ${lead.id} (${lead.signals.length} signal(s)): ${result.lead.qualification?.decision} -> ${result.activation.outcome}`);
+      } catch (error) {
+        Object.assign(job, { status: 'failed', finishedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) });
+        log(`[pipeline] ${lead.id} failed: ${job.error}`);
+      }
+      if (account.rerun) job.status = 'processing';
+    } while (account.rerun);
+    account.running = false;
+  }
 
   // Reads a JSON body, answering the error itself and returning undefined on failure.
   async function readJson(req: IncomingMessage, res: ServerResponse): Promise<unknown | undefined> {
@@ -167,32 +214,44 @@ export function createSignalServer({ runtime, secret, process: run, approvals: a
     const parsed = IntentSignalSchema.safeParse(json);
     if (!parsed.success) return send(res, 400, { error: 'Invalid signal', issues: z.prettifyError(parsed.error) });
 
-    let lead: Lead;
+    let incoming: Lead;
     try {
-      lead = intentToLead(parsed.data);
+      incoming = intentToLead(parsed.data);
     } catch (error) {
       if (error instanceof IntakeError) return send(res, 422, { error: error.message });
       throw error;
     }
 
-    const job: LeadJob = { leadId: lead.id, companyDomain: lead.companyDomain, status: 'processing', receivedAt: new Date().toISOString() };
-    remember(job);
-    send(res, 202, { status: 'accepted', leadId: lead.id, companyDomain: lead.companyDomain, statusUrl: `/api/leads/${lead.id}` });
-    log(`[signal] accepted ${parsed.data.eventType} for ${lead.companyDomain} -> ${lead.id}`);
+    const known = accounts.get(incoming.companyDomain);
+    const account: Account = known ?? {
+      lead: incoming,
+      job: { leadId: incoming.id, companyDomain: incoming.companyDomain, signalCount: 0, status: 'processing', receivedAt: new Date().toISOString() },
+      running: false,
+      rerun: false,
+    };
+    const { leadId, companyDomain } = account.job;
+    const reply = { leadId, companyDomain, statusUrl: `/api/leads/${leadId}` };
+    if (known) {
+      const merged = mergeLead(known.lead, incoming, Date.now());
+      if (!merged) {
+        log(`[signal] duplicate ${parsed.data.eventType} for ${companyDomain} ignored`);
+        return send(res, 200, { status: 'duplicate', signalCount: known.lead.signals.length, ...reply });
+      }
+      known.lead = merged;
+      known.job.status = 'processing';
+    }
+    account.job.signalCount = account.lead.signals.length;
+    remember(account);
+    send(res, 202, { status: known ? 'merged' : 'accepted', signalCount: account.job.signalCount, ...reply });
+    log(`[signal] ${known ? 'merged' : 'accepted'} ${parsed.data.eventType} for ${companyDomain} -> ${leadId} (${account.job.signalCount} signal(s))`);
 
     // Run the pipeline after responding; a failure is recorded on the job, never thrown.
-    setImmediate(() => {
-      runPipeline(lead)
-        .then(result => {
-          const draft = result.activation.draft ? approvals.register(result.lead, result.activation.draft) : null;
-          Object.assign(job, { status: 'done', finishedAt: new Date().toISOString(), result: { ...summarize(result), draftId: draft?.id ?? null } });
-          log(`[pipeline] ${lead.id}: ${result.lead.qualification?.decision} -> ${result.activation.outcome}`);
-        })
-        .catch(error => {
-          Object.assign(job, { status: 'failed', finishedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) });
-          log(`[pipeline] ${lead.id} failed: ${job.error}`);
-        });
-    });
+    if (account.running) {
+      account.rerun = true;
+    } else {
+      account.running = true;
+      setImmediate(() => void drain(account));
+    }
   }
 
   // Approval endpoints are closed unless a token is configured, except in mock mode.

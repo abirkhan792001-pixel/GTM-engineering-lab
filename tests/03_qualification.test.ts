@@ -30,15 +30,17 @@ describe('03 qualification: end-to-end on the mock leads', () => {
   it('northwind-data.example passes with a high score and cited evidence', async () => {
     const q = await qualifyMock(0);
     assert.equal(q.decision, 'pass');
-    assert.equal(q.score, 98);
+    assert.equal(q.score, 94);
     assert.deepEqual(q.missingFields, []);
     assert.ok(q.evidence.some(e => e.startsWith("Industry 'B2B SaaS' is a target industry (+30) [apollo]")));
+    // Its LinkedIn engagement (tier 4) outscores the older hiring post (tier 3).
+    assert.ok(q.evidence.some(e => e.startsWith('Fresh linkedin-own-post-engagement signal (tier 4, engagement) via linkedin')));
   });
 
   it('quietpeak.example is held with hqCountry missing', async () => {
     const q = await qualifyMock(1);
     assert.equal(q.decision, 'hold');
-    assert.equal(q.score, 67);
+    assert.equal(q.score, 68);
     assert.deepEqual(q.missingFields, ['hqCountry']);
   });
 
@@ -82,21 +84,31 @@ describe('03 qualification: hard gate dealbreakers', () => {
   });
 });
 
-describe('03 qualification: signal age decay', () => {
-  // TARGET_FIRMOGRAPHICS scores 70; the rest is intent. Hiring is worth up to 30.
+describe('03 qualification: signal warmth and age decay', () => {
+  // TARGET_FIRMOGRAPHICS scores 70; the rest is intent. A demo request is worth up to 30.
   const scoreWith = async (...signals: ReturnType<typeof signal>[]) =>
     (await mockScoreRubric(makeLead({ signals }), { asOfMs: NOW, icp: ICP })).score;
+  const demo = (ageDays: number) => signal({ ageDays, rawData: { signalType: 'demo-request' } });
 
   it('decays linearly to zero at maxSignalAgeDays', async () => {
-    assert.equal(await scoreWith(signal({ ageDays: 0 })), 100);
-    assert.equal(await scoreWith(signal({ ageDays: 15 })), 85);
-    assert.equal(await scoreWith(signal({ ageDays: 30 })), 70);
-    assert.equal(await scoreWith(signal({ ageDays: 31 })), 70);
+    assert.equal(await scoreWith(demo(0)), 100);
+    assert.equal(await scoreWith(demo(15)), 85);
+    assert.equal(await scoreWith(demo(30)), 70);
+    assert.equal(await scoreWith(demo(31)), 70);
   });
 
-  it('weights signal types from icp.json (pricing-page visit worth 20)', async () => {
-    assert.equal(await scoreWith(signal({ ageDays: 0, rawData: { signalType: 'pricing-page-visit' } })), 90);
-    assert.equal(await scoreWith(signal({ ageDays: 0, rawData: { signalType: 'something-else' } })), 80);
+  it('weights signal types by their warmth tier in icp.json', async () => {
+    const at = (signalType: string) => scoreWith(signal({ ageDays: 0, rawData: { signalType } }));
+    assert.equal(await at('signup'), 98); // tier 5, hand-raise
+    assert.equal(await at('linkedin-own-post-engagement'), 94); // tier 4
+    assert.equal(await at('linkedin-competitor-post-engagement'), 88); // tier 4
+    assert.equal(await at('hiring'), 85); // tier 3
+    assert.equal(await at('something-else'), 75); // default, tier 1
+  });
+
+  it('names the tier in the evidence line', async () => {
+    const rubric = await mockScoreRubric(makeLead({ signals: [signal({ ageDays: 0, rawData: { signalType: 'linkedin-profile-view' } })] }), { asOfMs: NOW, icp: ICP });
+    assert.ok(rubric.evidence.includes('Fresh linkedin-profile-view signal (tier 4, engagement) via job-board, 0.0 days old (+20.0 of 20) [sig_test_001]'));
   });
 
   it('ignores future-dated signals', async () => {
@@ -108,7 +120,7 @@ describe('03 qualification: signal age decay', () => {
       signal({ id: 'a', ageDays: 20, rawData: { signalType: 'hiring' } }),
       signal({ id: 'b', ageDays: 0, rawData: { signalType: 'pricing-page-visit' } }),
     );
-    assert.equal(score, 90);
+    assert.equal(score, 92);
   });
 
   it('records a stale-only lead as having no fresh intent', async () => {
@@ -166,6 +178,14 @@ describe('03 qualification: decisions and evidence', () => {
   it('rejects an ICP config whose rubric does not sum to 100', () => {
     const bad = { ...ICP, scoring: { ...ICP.scoring, weights: { ...ICP.scoring.weights, industry: 50 } } };
     assert.ok(!IcpSchema.safeParse(bad).success);
+  });
+
+  it('rejects an ICP config where a colder tier outscores a warmer one', () => {
+    const signals = { ...ICP.scoring.signals, hiring: { tier: 3, points: 26 } };
+    const result = IcpSchema.safeParse({ ...ICP, scoring: { ...ICP.scoring, signals } });
+    assert.ok(!result.success);
+    assert.match(result.error.message, /earns fewer points than colder 'hiring'/);
+    assert.ok(!IcpSchema.safeParse({ ...ICP, scoring: { ...ICP.scoring, signals: { ...signals, hiring: { tier: 6, points: 10 } } } }).success, 'tier above 5');
   });
 });
 

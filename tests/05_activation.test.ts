@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { generateMockSignals } from '../src/01_signals/index';
+import { generateMockCohort, generateMockSignals } from '../src/01_signals/index';
 import {
   activateLead,
   createApprovalService,
@@ -13,13 +13,14 @@ import {
   createResendSender,
   draftContentHash,
   draftIdFor,
+  planOutreach,
   type DraftRecord,
   type ProspectSender,
   reviewEmailText,
   toBlockKit,
 } from '../src/05_activation/index';
 import { assignVariant } from '../src/06_learning/index';
-import { processLead } from '../src/runPipeline';
+import { processBatch, processLead } from '../src/runPipeline';
 import { ActivationResultSchema, EmailDraftSchema, type Lead } from '../src/shared/types';
 import { parseVoiceGuidelines, VOICE, VOICE_MARKDOWN } from '../src/shared/voice';
 import { CLOCKS, DAY_MS, fakeFetch, freshAdapters, makeLead, NOW, OFFLINE, passQualification, signal, verifiedContact } from './helpers';
@@ -96,11 +97,90 @@ describe('05 activation: routing by decision', () => {
     await assert.rejects(activate(makeLead()), /has no qualification/);
   });
 
-  it('routes the three mock leads end to end', async () => {
+  it('routes the four mock leads end to end', async () => {
     const adapters = freshAdapters();
     const outcomes = [];
     for (const { lead } of generateMockSignals()) outcomes.push((await processLead(lead, { clocks: CLOCKS, adapters, qualify: OFFLINE })).activation.outcome);
-    assert.deepEqual(outcomes, ['activated', 'manual_review', 'disqualified']);
+    assert.deepEqual(outcomes, ['activated', 'manual_review', 'disqualified', 'routed_to_sales']);
+  });
+});
+
+describe('05 activation: hand-raisers and the daily outreach limit', () => {
+  const at = (signalType: string, ageDays = 1, id = `sig_${signalType}`) => signal({ id, ageDays, rawData: { signalType } });
+  const ranked = (id: string, score: number, ...signals: ReturnType<typeof signal>[]) =>
+    passLead({ id, companyDomain: `${id}.example`, signals, qualification: { ...passQualification(), score } });
+
+  it('hands a fresh demo request straight to sales: CRM record and alert, no draft', async () => {
+    const adapters = freshAdapters();
+    const result = await activate(passLead({ signals: [at('demo-request')], contact: verifiedContact() }), adapters);
+    assert.equal(result.outcome, 'routed_to_sales');
+    assert.equal(result.draft, null);
+    assert.ok(result.crm);
+    assert.deepEqual(result.alerts.map(a => a.channel), ['#hot-leads']);
+    assert.match(result.alerts[0]!.text, /Hand-raiser, reply personally/);
+    assert.match(result.alerts[0]!.text, /Reply personally to the demo-request \[sig_demo-request\]/);
+    assert.match(result.alerts[0]!.text, /Lena Hoffmann, Director of Sales Operations <lena\.hoffmann@test\.example>/);
+  });
+
+  it('drafts as usual when the demo request is stale', async () => {
+    assert.equal((await activate(passLead({ signals: [at('demo-request', 45), at('hiring')] }))).outcome, 'activated');
+  });
+
+  it('queues a passing lead the planner put over the limit, with no side effects', async () => {
+    const adapters = freshAdapters();
+    const result = await activateLead(passLead(), { ...adapters, queuedReason: 'Priority 6 of 6: over the limit', now: () => NOW });
+    assert.deepEqual([result.outcome, result.active, result.reason], ['queued', true, 'Priority 6 of 6: over the limit']);
+    assert.deepEqual([result.crm, result.draft, result.alerts], [null, null, []]);
+    assert.equal(adapters.crm.records.size, 0);
+  });
+
+  it('enforces the new outcome invariants in the schema', () => {
+    const base = { leadId: 'l', companyDomain: 'a.example', active: true, reason: 'r', crm: null, draft: null, alerts: [], log: [], activatedAt: NOW };
+    assert.ok(!ActivationResultSchema.safeParse({ ...base, outcome: 'routed_to_sales' }).success, 'sales handoff without CRM or alert');
+    assert.ok(ActivationResultSchema.safeParse({ ...base, outcome: 'queued' }).success);
+    assert.ok(!ActivationResultSchema.safeParse({ ...base, outcome: 'queued', active: false }).success, 'queued must stay active');
+  });
+
+  it('ranks by warmth tier first, then ICP score, then freshness, and queues over the limit', () => {
+    const leads = [
+      ranked('hiring_high', 99, at('hiring', 0)),
+      ranked('linkedin_old', 75, at('linkedin-profile-view', 9)),
+      ranked('linkedin_new', 75, at('linkedin-profile-view', 1)),
+      ranked('signup', 72, at('signup', 2)),
+      ranked('demo', 80, at('demo-request', 0)),
+      makeLead({ id: 'held', qualification: { score: 50, decision: 'hold', evidence: ['Held: x'], missingFields: [] } }),
+    ];
+    const plan = planOutreach(leads, { asOfMs: NOW, limit: 3 });
+    assert.deepEqual(plan.map(s => [s.leadId, s.lane, s.rank]), [
+      ['demo', 'sales', null],
+      ['signup', 'outreach', 1],
+      ['linkedin_new', 'outreach', 2],
+      ['linkedin_old', 'outreach', 3],
+      ['hiring_high', 'queued', 4],
+      ['held', 'not_qualified', null],
+    ]);
+    assert.equal(plan[1]!.reason, 'Priority 1 of 4: tier 5 (hand-raise) signup signal, score 72');
+    assert.match(plan[4]!.reason, /over the daily outreach limit of 3, queued for the next run/);
+  });
+
+  it('runs a batch: merges accounts, hands off the demo request, drafts the warmest and queues the rest', async () => {
+    const cohort = generateMockCohort().slice(0, 3);
+    const [northwind, quietpeak, , ravenhill] = generateMockSignals().map(s => s.lead);
+    // A second webhook for northwind arrives as its own lead; the batch merges it.
+    const repeat = { ...northwind!, id: 'lead_northwind-data_2', signals: [{ ...northwind!.signals[0]!, id: 'sig_dup', timestamp: northwind!.signals[0]!.timestamp - 1 }] };
+    const results = await processBatch([...cohort, northwind!, quietpeak!, ravenhill!, repeat], { clocks: CLOCKS, adapters: freshAdapters(), qualify: OFFLINE, dailyOutreachLimit: 2 });
+
+    assert.equal(results.filter(r => r.lead.companyDomain === 'northwind-data.example').length, 1);
+    assert.equal(results.find(r => r.lead.companyDomain === 'northwind-data.example')!.lead.signals.length, 4);
+    assert.deepEqual(results.map(r => [r.lead.companyDomain, r.activation.outcome]), [
+      ['ravenhill.example', 'routed_to_sales'],
+      ['northwind-data.example', 'activated'], // tier 4 LinkedIn engagement beats tier 3 hiring
+      ['acornmetrics.example', 'activated'],
+      ['bluefjord.example', 'queued'],
+      ['cobaltpay.example', 'queued'],
+      ['quietpeak.example', 'manual_review'],
+    ]);
+    assert.equal(results.filter(r => r.activation.draft).length, 2, 'drafts never exceed the limit');
   });
 });
 
@@ -358,6 +438,60 @@ describe('05 activation: draft approval before sending', () => {
     assert.equal(record.contentHash, draftContentHash(draft));
     assert.equal(approvals.register(lead, draft), record, 'idempotent');
     assert.deepEqual(approvals.list('pending_approval').map(r => r.id), [record.id]);
+  });
+
+  it('replaces a pending draft when the lead is re-run, but never one already sent', async () => {
+    const { lead, draft } = await drafted();
+    const { approvals } = service();
+    const record = approvals.register(lead, draft);
+    const redrafted = { ...draft, subject: 'a newer subject' };
+    assert.equal(approvals.register(lead, redrafted), record);
+    assert.deepEqual([record.draft.subject, record.contentHash], ['a newer subject', draftContentHash(redrafted)]);
+    assert.deepEqual(record.history.map(h => h.action), ['created', 'updated']);
+
+    assert.ok((await approvals.approve(record.id, approveInput(record))).ok);
+    approvals.register(lead, { ...draft, subject: 'a third subject' });
+    assert.deepEqual([record.status, record.draft.subject], ['sent', 'a newer subject'], 'one first touch per account');
+    assert.equal(approvals.withdraw(lead.id, 'x')!.status, 'sent', 'a sent draft cannot be withdrawn');
+  });
+
+  it('withdraws a pending draft by blocking it', async () => {
+    const { lead, draft } = await drafted();
+    const { approvals, sender } = service();
+    const record = approvals.register(lead, draft);
+    approvals.withdraw(lead.id, 'Superseded: the lead is now routed_to_sales');
+    assert.equal(record.status, 'blocked');
+    assert.deepEqual(record.history.at(-1), { at: NOW + 60_000, action: 'blocked', by: 'pipeline', note: 'Superseded: the lead is now routed_to_sales' });
+    assert.equal((await approvals.approve(record.id, approveInput(record))).ok, false);
+    assert.equal(sender.outbox.length, 0);
+    assert.equal(approvals.withdraw('lead_unknown', 'x'), undefined);
+  });
+
+  it('lists pending drafts warmest first', async () => {
+    const { approvals } = service();
+    for (const [id, signalType] of [['lead_hiring', 'hiring'], ['lead_signup', 'signup'], ['lead_view', 'linkedin-profile-view']] as const) {
+      const { lead, draft } = await drafted({ id, signals: [signal({ id: `sig_${id}`, rawData: { signalType } })] });
+      approvals.register(lead, draft);
+    }
+    assert.deepEqual(approvals.list('pending_approval').map(r => r.leadId), ['lead_signup', 'lead_view', 'lead_hiring']);
+  });
+
+  it('sends at most the daily outreach limit per UTC day', async () => {
+    let clock = NOW + 60_000;
+    const sender = createMockSender();
+    const approvals = createApprovalService({ sender, crm: createMockCRM(), now: () => clock, dailySendLimit: 2 });
+    const records = [];
+    for (const id of ['lead_1', 'lead_2', 'lead_3']) {
+      const { lead, draft } = await drafted({ id });
+      records.push(approvals.register(lead, draft));
+    }
+    const outcomes = await Promise.all(records.map(r => approvals.approve(r.id, approveInput(r))));
+    assert.deepEqual(outcomes.map(o => (o.ok ? 'sent' : o.code)), ['sent', 'sent', 'limit_reached']);
+    assert.equal(records[2]!.status, 'pending_approval', 'still pending, not blocked');
+    assert.equal(sender.outbox.length, 2);
+
+    clock += DAY_MS; // the next UTC day, still inside the 7-day verification window
+    assert.ok((await approvals.approve(records[2]!.id, approveInput(records[2]!))).ok);
   });
 
   it('sends an approved draft to the prospect and records the audit trail', async () => {

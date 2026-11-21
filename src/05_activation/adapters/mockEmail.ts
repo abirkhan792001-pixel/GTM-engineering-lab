@@ -2,7 +2,8 @@ import { mergedEnrichmentData } from '../../02_enrichment/index';
 import { recipientGap, sendableEmail } from '../../04_contacts/index';
 import { assignVariant, FIRST_TOUCH_EXPERIMENT, renderTemplate, type Experiment } from '../../06_learning/index';
 import { PERSONAS, selectPersona, type Persona } from '../../shared/personas';
-import { EmailDraftSchema, type EmailDraft, type Lead, type Signal } from '../../shared/types';
+import { EmailDraftSchema, type EmailDraft, type Lead } from '../../shared/types';
+import { freshSignalsByWarmth } from '../../shared/warmth';
 import { VOICE, type VoiceGuidelines } from '../../shared/voice';
 
 // Simulates drafting a first touch (as an LLM would) for a Resend-style sender.
@@ -10,8 +11,10 @@ import { VOICE, type VoiceGuidelines } from '../../shared/voice';
 // human approval; sending an approved draft is a separate, later step.
 //
 // Copy rules come from src/context/voice.md: the draft uses one observation taken
-// from the signal that qualification scored, and is linted against the parsed
-// limits and banned words. Failed checks become review notes; they are never hidden.
+// from a fresh public signal (a job posting), and is linted against the parsed limits
+// and banned words. Failed checks become review notes; they are never hidden. Warmer
+// signals such as website visits or LinkedIn engagement decide who is contacted, but are
+// never mentioned to the prospect.
 //
 // A/B test: the subject line and the relevance sentence come from the variant that
 // 06_learning assigns to the lead; experimentId and variantId are stamped on the draft.
@@ -49,12 +52,13 @@ function companyName(lead: Lead): string {
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
-// The signal qualification counted as strongest, identified by its id in the evidence.
-function scoredSignal(lead: Lead): { signal: Signal; evidenceLine: string } | null {
-  for (const line of lead.qualification?.evidence ?? []) {
-    const id = line.match(/^Fresh .*\[(.+)\]$/)?.[1];
-    const signal = id ? lead.signals.find(s => s.id === id) : undefined;
-    if (signal) return { signal, evidenceLine: line };
+// The freshest job posting with a quotable title, and the evidence line that cites it.
+function quotableSignal(lead: Lead, asOfMs: number): { jobTitle: string; evidenceLine: string } | null {
+  for (const { signal, type } of freshSignalsByWarmth(lead.signals, asOfMs)) {
+    const jobTitle = type === 'hiring' ? safeText(signal.rawData.jobTitle) : null;
+    if (!jobTitle) continue;
+    const cited = lead.qualification?.evidence.find(line => line.endsWith(`[${signal.id}]`));
+    return { jobTitle, evidenceLine: cited ?? `Hiring signal for '${jobTitle}' via ${signal.source} [${signal.id}]` };
   }
   return null;
 }
@@ -105,18 +109,17 @@ export function createMockEmail(options: EmailOptions = {}): EmailAdapter {
       const asOfMs = context.asOfMs ?? Date.now();
       const to = sendableEmail(lead, asOfMs);
       const company = companyName(lead);
-      const scored = scoredSignal(lead);
+      const quotable = quotableSignal(lead, asOfMs);
       const variant = assignVariant(lead.id, experiment);
       const reviewNotes: string[] = [];
       const evidenceUsed: string[] = [];
 
-      // 1. One observation, only if the scored signal is publicly observable and safe to quote.
-      //    Website visits are never mentioned to the prospect.
-      const jobTitle = scored?.signal.rawData.signalType === 'hiring' ? safeText(scored.signal.rawData.jobTitle) : null;
+      // 1. One observation, only from a public signal that is safe to quote.
+      const jobTitle = quotable?.jobTitle ?? null;
       let observation: string;
-      if (scored && jobTitle) {
-        observation = `I saw ${company} is hiring a ${jobTitle}.`;
-        evidenceUsed.push(scored.evidenceLine);
+      if (quotable) {
+        observation = `I saw ${company} is hiring a ${quotable.jobTitle}.`;
+        evidenceUsed.push(quotable.evidenceLine);
       } else {
         const industry = safeText(data.industry);
         observation = industry ? `I work with ${industry} teams on lead qualification.` : 'I work with B2B teams on lead qualification.';

@@ -2,12 +2,21 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { CompanyDomainSchema, LeadSchema, type Lead } from '../shared/types';
 
-// Converts an inbound webhook (contact form, signup, pricing-page visit, ...) into a lead.
+// Converts an inbound webhook (contact form, signup, LinkedIn engagement, ...) into a lead.
 // The payload is untrusted: it is validated here, unknown top-level keys are dropped, and
 // its contents only ever travel as signal rawData, which never counts as verified company
 // data. The company is identified by companyDomain, or failing that the email's domain.
 
-export const INTENT_EVENT_TYPES = ['contact_form', 'demo_request', 'signup', 'pricing_page_visit', 'hiring'] as const;
+export const INTENT_EVENT_TYPES = ['contact_form', 'demo_request', 'signup', 'pricing_page_visit', 'linkedin_engagement', 'hiring'] as const;
+
+// What a linkedin_engagement event was, and the signal type (icp.json scoring.signals) it becomes.
+const LinkedinEngagementSchema = z.enum(['own_post', 'competitor_post', 'profile_view', 'company_follow']);
+export const LINKEDIN_ENGAGEMENTS: Record<z.infer<typeof LinkedinEngagementSchema>, string> = {
+  own_post: 'linkedin-own-post-engagement',
+  competitor_post: 'linkedin-competitor-post-engagement',
+  profile_view: 'linkedin-profile-view',
+  company_follow: 'linkedin-company-follow',
+};
 
 export const IntentSignalSchema = z
   .object({
@@ -16,12 +25,22 @@ export const IntentSignalSchema = z
     companyDomain: z.string().trim().min(1).max(253).optional(),
     email: z.email().max(254).optional(),
     name: z.string().trim().min(1).max(120).optional(),
+    // The person's job title, e.g. from a form field or their LinkedIn headline.
+    title: z.string().trim().min(1).max(120).optional(),
+    linkedinUrl: z.url().max(300).optional(),
+    // Required for linkedin_engagement: liked or commented on your post or a competitor's,
+    // viewed your profile, or followed your company page.
+    engagement: LinkedinEngagementSchema.optional(),
     companyName: z.string().trim().min(1).max(120).optional(),
     occurredAt: z.iso.datetime({ offset: true }).optional(),
     // Anything else the sender wants to keep with the signal.
     metadata: z.record(z.string(), z.unknown()).optional(),
   })
-  .refine(s => s.companyDomain || s.email, { message: 'Provide companyDomain or email so the company can be identified', path: ['companyDomain'] });
+  .refine(s => s.companyDomain || s.email, { message: 'Provide companyDomain or email so the company can be identified', path: ['companyDomain'] })
+  .refine(s => (s.eventType === 'linkedin_engagement') === Boolean(s.engagement), {
+    message: `engagement (${LinkedinEngagementSchema.options.join(', ')}) is required for linkedin_engagement and only allowed there`,
+    path: ['engagement'],
+  });
 export type IntentSignal = z.infer<typeof IntentSignalSchema>;
 
 // Personal mailbox providers say nothing about the company.
@@ -70,10 +89,12 @@ export function intentToLead(signal: IntentSignal, { now = Date.now(), id = () =
         source: signal.source,
         timestamp: occurredAt,
         rawData: {
-          signalType: signal.eventType.replace(/_/g, '-'),
+          signalType: signal.engagement ? LINKEDIN_ENGAGEMENTS[signal.engagement] : signal.eventType.replace(/_/g, '-'),
           ...(signal.companyName && { companyName: signal.companyName }),
           ...(signal.name && { contactName: signal.name }),
+          ...(signal.title && { contactTitle: signal.title }),
           ...(signal.email && { contactEmail: signal.email }),
+          ...(signal.linkedinUrl && { contactLinkedinUrl: signal.linkedinUrl }),
           ...(signal.metadata && { metadata: signal.metadata }),
         },
       },

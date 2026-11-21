@@ -7,6 +7,7 @@ import type { EnrichmentProvider } from './types';
 const DATABASE: Record<string, { headcount: number; industry: string; hqCountry: string }> = {
   'northwind-data.example': { headcount: 140, industry: 'B2B SaaS', hqCountry: 'DE' },
   'snapsnack.example': { headcount: 6, industry: 'Consumer Mobile Apps', hqCountry: 'US' },
+  'ravenhill.example': { headcount: 90, industry: 'Developer Tools', hqCountry: 'GB' },
   // quietpeak.example is intentionally absent: a young company the database has not indexed.
 
   ...Object.fromEntries(LEARNING_COHORT.map(c => [c.domain, { headcount: c.headcount, industry: c.industry, hqCountry: c.hqCountry }])),

@@ -107,11 +107,11 @@ describe('runtime: choosing mock or live integrations', () => {
 describe('runtime: end-to-end pipeline runs', () => {
   const mockLeads = () => generateMockSignals().map(s => s.lead);
 
-  it('runs all three mock leads in live mode with no keys, without crashing', async () => {
+  it('runs all four mock leads in live mode with no keys, without crashing', async () => {
     const runtime = buildRuntime(loadConfig({ MOCK_MODE: 'false' }));
     const outcomes = [];
     for (const lead of mockLeads()) outcomes.push((await processLead(lead, { ...runtime.pipeline, clocks: CLOCKS })).activation.outcome);
-    assert.deepEqual(outcomes, ['activated', 'manual_review', 'disqualified']);
+    assert.deepEqual(outcomes, ['activated', 'manual_review', 'disqualified', 'routed_to_sales']);
   });
 
   it('uses the live adapters when keys are set (fakes stand in for the APIs)', async () => {
@@ -141,6 +141,6 @@ describe('runtime: end-to-end pipeline runs', () => {
       outcomes.push(result.activation.outcome);
       for (const alert of result.activation.alerts) assert.equal(alert.delivery, 'failed');
     }
-    assert.deepEqual(outcomes, ['activated', 'manual_review', 'disqualified']);
+    assert.deepEqual(outcomes, ['activated', 'manual_review', 'disqualified', 'routed_to_sales']);
   });
 });

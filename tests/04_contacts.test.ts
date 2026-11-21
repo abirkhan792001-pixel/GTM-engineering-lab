@@ -14,7 +14,7 @@ import {
   type PeopleSearchProvider,
 } from '../src/04_contacts/index';
 import { ContactSchema, type Lead } from '../src/shared/types';
-import { CLOCKS, DAY_MS, makeLead, NOW, OFFLINE, passQualification, verifiedContact } from './helpers';
+import { CLOCKS, DAY_MS, makeLead, NOW, OFFLINE, passQualification, signal, verifiedContact } from './helpers';
 
 const now = () => NOW;
 const passLead = (overrides: Partial<Lead> = {}) => makeLead({ qualification: passQualification(), ...overrides });
@@ -37,21 +37,53 @@ function finder(result: Awaited<ReturnType<EmailFinderProvider['find']>> | (() =
   return { name: 'finder', costInCents: 2, find: async () => (typeof result === 'function' ? result() : result) };
 }
 
+// A finder that can also verify a known address; records which method ran.
+function verifyingFinder() {
+  const calls: string[] = [];
+  const provider: EmailFinderProvider & { calls: string[] } = {
+    name: 'finder',
+    costInCents: 2,
+    calls,
+    async find({ fullName }) {
+      calls.push(`find:${fullName}`);
+      return { email: 'guessed@test.example', status: 'valid' };
+    },
+    async verify(email) {
+      calls.push(`verify:${email}`);
+      return { email, status: 'valid' };
+    },
+  };
+  return provider;
+}
+
+// A pass lead whose only fresh signal names a person.
+const namedLead = (rawData: Record<string, unknown>, ageDays = 1) =>
+  passLead({ signals: [signal({ id: 'sig_named', source: 'linkedin', ageDays, rawData: { signalType: 'linkedin-own-post-engagement', ...rawData } })] });
+
 async function qualifiedMock(index: number): Promise<Lead> {
   const lead = await enrichLead(generateMockSignals()[index]!.lead, { now: CLOCKS.enrich });
   return qualifyLead(lead, { now: CLOCKS.qualify, ...OFFLINE });
 }
 
 describe('04 contacts: lookup on the mock leads', () => {
-  it('finds and verifies the buyer at northwind-data.example for 3 cents', async () => {
+  it('addresses the LinkedIn engager at northwind-data.example, skipping the people search', async () => {
     const lead = await lookupContact(await qualifiedMock(0), { now });
     const c = lead.contact!;
     assert.equal(c.status, 'verified');
     assert.deepEqual(c.person, { fullName: 'Lena Hoffmann', title: 'Director of Sales Operations', personaId: 'revops-leader' });
     assert.equal(c.email, 'lena.hoffmann@northwind-data.example');
     assert.equal(c.verifiedAt, NOW);
-    assert.equal(totalContactCostInCents(lead), 3);
+    assert.deepEqual(c.steps.map(s => [s.step, s.source]), [['signal', 'linkedin'], ['email_finder', 'email-finder']]);
+    assert.match(c.reason, /named by the linkedin-own-post-engagement signal/);
+    assert.equal(totalContactCostInCents(lead), 2);
     assert.equal(lead.updatedAt, NOW);
+  });
+
+  it('verifies the email a demo request gave for ravenhill.example', async () => {
+    const lead = await lookupContact(await qualifiedMock(3), { now });
+    assert.equal(lead.contact!.status, 'verified');
+    assert.equal(lead.contact!.email, 'sam.okafor@ravenhill.example');
+    assert.equal(lead.contact!.person!.personaId, 'revops-leader');
   });
 
   it('skips leads that did not pass qualification, at no cost', async () => {
@@ -110,6 +142,63 @@ describe('04 contacts: choosing the buyer', () => {
     assert.deepEqual(c.steps.map(s => s.step), ['person_search']);
     assert.equal(totalContactCostInCents(lead), 1);
     assert.match(recipientGap(lead, NOW)!, /No buyer found: nobody at test\.example has a persona title/);
+  });
+});
+
+describe('04 contacts: people named by signals', () => {
+  it('uses a named person with a buyer title, with no people search', async () => {
+    const roster = people([{ fullName: 'Paul Wagner', title: 'Director of Sales Operations' }]);
+    const lead = await lookupContact(namedLead({ contactName: 'Mia Chen', contactTitle: 'RevOps Manager' }), { peopleSearch: roster, emailFinder: verifyingFinder(), now });
+    assert.equal(lead.contact!.person!.fullName, 'Mia Chen');
+    assert.equal(roster.calls(), 0);
+    assert.deepEqual(lead.contact!.steps[0], { step: 'signal', source: 'linkedin', status: 'found', costInCents: 0 });
+  });
+
+  it('verifies the email the signal gave when it is on the company domain', async () => {
+    const emailFinder = verifyingFinder();
+    const lead = await lookupContact(namedLead({ contactName: 'Mia Chen', contactTitle: 'CEO', contactEmail: 'Mia@Test.example' }), { emailFinder, now });
+    assert.deepEqual(emailFinder.calls, ['verify:mia@test.example']);
+    assert.equal(lead.contact!.email, 'mia@test.example');
+  });
+
+  it('looks up a work email instead of using one on another domain', async () => {
+    const emailFinder = verifyingFinder();
+    const lead = await lookupContact(namedLead({ contactName: 'Mia Chen', contactTitle: 'CEO', contactEmail: 'mia@gmail.com' }), { emailFinder, now });
+    assert.deepEqual(emailFinder.calls, ['find:Mia Chen']);
+    assert.equal(lead.contact!.email, 'guessed@test.example');
+  });
+
+  it('finds a missing title in the people search', async () => {
+    const roster = people([{ fullName: 'mia chen', title: 'VP Revenue Operations' }]);
+    const lead = await lookupContact(namedLead({ contactName: 'Mia Chen' }), { peopleSearch: roster, emailFinder: verifyingFinder(), now });
+    assert.equal(lead.contact!.person!.title, 'VP Revenue Operations');
+    assert.deepEqual(lead.contact!.steps.map(s => s.step), ['signal', 'person_search', 'email_finder']);
+  });
+
+  for (const [why, rawData] of [
+    ['is not a buyer persona', { contactName: 'Mia Chen', contactTitle: 'Software Engineer' }],
+    ['has an excluded title', { contactName: 'Mia Chen', contactTitle: 'Recruiter, RevOps Manager' }],
+    ['has no known title', { contactName: 'Mia Chen' }],
+  ] as const) {
+    it(`falls back to the persona search when the named person ${why}`, async () => {
+      const roster = people([{ fullName: 'Lena Hoffmann', title: 'RevOps Manager' }]);
+      const lead = await lookupContact(namedLead(rawData), { peopleSearch: roster, emailFinder: verifyingFinder(), now });
+      assert.equal(lead.contact!.person!.fullName, 'Lena Hoffmann');
+      assert.equal(roster.calls(), 1, 'searched once');
+      assert.match(lead.contact!.reason, /Mia Chen .*from the linkedin-own-post-engagement signal/);
+    });
+  }
+
+  it('ignores a stale signal and picks the person from the warmest fresh one', async () => {
+    assert.equal((await lookupContact(namedLead({ contactName: 'Mia Chen', contactTitle: 'CEO' }, 45), { peopleSearch: people([]), now })).contact!.status, 'not_found');
+
+    const lead = passLead({
+      signals: [
+        signal({ id: 'li', source: 'linkedin', ageDays: 0, rawData: { signalType: 'linkedin-profile-view', contactName: 'Mia Chen', contactTitle: 'CEO' } }),
+        signal({ id: 'su', source: 'app', ageDays: 3, rawData: { signalType: 'signup', contactName: 'Tom Ruiz', contactTitle: 'Founder' } }),
+      ],
+    });
+    assert.equal((await lookupContact(lead, { emailFinder: verifyingFinder(), now })).contact!.person!.fullName, 'Tom Ruiz', 'tier 5 signup beats a newer tier 4 view');
   });
 });
 
